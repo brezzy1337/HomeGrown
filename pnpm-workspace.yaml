@@ -1,0 +1,6 @@
+packages:
+  - "apps/*"
+  - "packages/*"
+
+# Supply-chain guard: only adopt package versions ≥ 7 days old (minutes)
+minimumReleaseAge: 10080

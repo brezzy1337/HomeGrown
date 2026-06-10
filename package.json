@@ -1,0 +1,14 @@
+{
+  "name": "homegrown",
+  "private": true,
+  "version": "0.1.0",
+  "description": "HomeGrown — local food marketplace monorepo (Expo app + tRPC server + GCP infra)",
+  "scripts": {
+    "dev:server": "pnpm --filter @homegrown/server dev",
+    "dev:mobile": "pnpm --filter @homegrown/mobile start",
+    "typecheck": "pnpm -r typecheck",
+    "lint": "pnpm -r lint",
+    "test": "pnpm -r test"
+  },
+  "packageManager": "pnpm@9.15.0"
+}
