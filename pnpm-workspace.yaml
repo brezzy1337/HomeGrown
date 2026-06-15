@@ -2,5 +2,32 @@ packages:
   - "apps/*"
   - "packages/*"
 
-# Supply-chain guard: only adopt package versions ≥ 7 days old (minutes)
+# Supply-chain guard: only adopt package versions ≥ 7 days old (minutes).
+# NOTE: enforced by pnpm 10+. The repo pins pnpm@9.15.0, which ignores this key —
+# bump packageManager to pnpm@10 to make the cooldown real (see Milestone 1 notes).
 minimumReleaseAge: 10080
+
+# Single source of truth for dependency versions across the workspace.
+# Packages reference these with "catalog:" instead of repeating version ranges.
+catalog:
+  # Tooling (TS 5.x + ESLint 9.x — the range typescript-eslint 8 supports)
+  typescript: ^5.6.0
+  "@types/node": ^22.10.0
+  eslint: ^9.17.0
+  "@eslint/js": ^9.17.0
+  typescript-eslint: ^8.20.0
+  prettier: ^3.4.0
+  vitest: ^4.0.0
+  tsx: ^4.19.0
+  # Runtime contracts / API
+  zod: ^4.0.0
+  "@trpc/server": ^11.0.0
+  "@trpc/client": ^11.0.0
+  "@trpc/react-query": ^11.0.0
+  "@tanstack/react-query": ^5.62.0
+  # Auth (self-issued JWT). Exact pin per dependency-auditor (M2); upgrades re-audit.
+  jose: 6.2.3
+  # Database
+  drizzle-orm: ^0.45.0
+  drizzle-kit: ^0.31.0
+  postgres: ^3.4.0

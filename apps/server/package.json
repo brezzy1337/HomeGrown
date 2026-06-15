@@ -2,13 +2,40 @@
   "name": "@homegrown/server",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/router.ts",
+  "exports": {
+    ".": {
+      "types": "./src/router.ts",
+      "default": "./src/index.ts"
+    }
+  },
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "tsc",
+    "start": "tsx src/index.ts",
     "typecheck": "tsc --noEmit",
-    "start": "node dist/index.js"
+    "lint": "eslint .",
+    "test": "vitest run",
+    "db:generate": "drizzle-kit generate",
+    "db:push": "drizzle-kit push"
   },
   "dependencies": {
-    "@homegrown/shared": "workspace:*"
+    "@homegrown/shared": "workspace:*",
+    "@trpc/server": "catalog:",
+    "drizzle-orm": "catalog:",
+    "jose": "catalog:",
+    "postgres": "catalog:",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@eslint/js": "catalog:",
+    "@types/node": "catalog:",
+    "drizzle-kit": "catalog:",
+    "eslint": "catalog:",
+    "tsx": "catalog:",
+    "typescript": "catalog:",
+    "typescript-eslint": "catalog:",
+    "vitest": "catalog:"
   }
 }
