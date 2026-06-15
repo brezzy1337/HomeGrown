@@ -41,22 +41,50 @@ export const storesRouter = router({
         });
       }
 
-      const [newStore] = await ctx.db
-        .insert(stores)
-        .values({
-          userId: ctx.user.id,
-          name: input.name,
-          logo: input.logo ?? null,
-          about: input.about ?? null,
-        })
-        .returning({
-          id: stores.id,
-          userId: stores.userId,
-          name: stores.name,
-          logo: stores.logo,
-          about: stores.about,
-          stripeConnectAccountId: stores.stripeConnectAccountId,
-        });
+      let newStore:
+        | {
+            id: string;
+            userId: string;
+            name: string;
+            logo: string | null;
+            about: string | null;
+            stripeConnectAccountId: string | null;
+          }
+        | undefined;
+      try {
+        const [inserted] = await ctx.db
+          .insert(stores)
+          .values({
+            userId: ctx.user.id,
+            name: input.name,
+            logo: input.logo ?? null,
+            about: input.about ?? null,
+          })
+          .returning({
+            id: stores.id,
+            userId: stores.userId,
+            name: stores.name,
+            logo: stores.logo,
+            about: stores.about,
+            stripeConnectAccountId: stores.stripeConnectAccountId,
+          });
+        newStore = inserted;
+      } catch (err) {
+        // Postgres unique-violation (SQLSTATE 23505) means a concurrent duplicate
+        // slipped past the precheck SELECT — surface it as a clean CONFLICT.
+        if (
+          typeof err === "object" &&
+          err !== null &&
+          "code" in err &&
+          (err as { code: unknown }).code === "23505"
+        ) {
+          throw new TRPCError({
+            code: "CONFLICT",
+            message: "You already have a store.",
+          });
+        }
+        throw err;
+      }
 
       if (!newStore) {
         throw new TRPCError({

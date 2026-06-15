@@ -56,10 +56,16 @@ export async function verifyPassword(
   stored: string,
 ): Promise<boolean> {
   const colonIndex = stored.indexOf(":");
-  if (colonIndex === -1) return false;
+  // colonIndex === -1 → no colon; colonIndex === 0 → empty salt (e.g. ":abc");
+  // colonIndex === stored.length - 1 → empty hash (e.g. "abc:").
+  if (colonIndex <= 0 || colonIndex >= stored.length - 1) return false;
 
   const salt = Buffer.from(stored.slice(0, colonIndex), "hex");
   const expectedHash = Buffer.from(stored.slice(colonIndex + 1), "hex");
+
+  // Decoded salt must be exactly SALT_BYTES long; a zero-length or wrong-length
+  // decoded value means the hex was empty or malformed.
+  if (salt.length !== SALT_BYTES) return false;
 
   const actualHash = await scryptAsync(plain, salt, KEY_LENGTH);
 

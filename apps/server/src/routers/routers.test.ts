@@ -39,6 +39,8 @@ function fakeDb(opts: {
   insertRows?: unknown[];
   /** Allow multiple selects to return different rows in sequence */
   selectSequence?: unknown[][];
+  /** If set, the insert .returning() rejects with this error instead of resolving. */
+  insertError?: unknown;
 }) {
   let selectCallCount = 0;
 
@@ -58,7 +60,10 @@ function fakeDb(opts: {
 
   const insertBuilder = {
     values: () => insertBuilder,
-    returning: () => Promise.resolve(opts.insertRows ?? []),
+    returning: () =>
+      opts.insertError !== undefined
+        ? Promise.reject(opts.insertError)
+        : Promise.resolve(opts.insertRows ?? []),
   };
   const insertFn = () => insertBuilder;
 
@@ -106,7 +111,7 @@ describe("auth.register", () => {
     expect(result.token).not.toContain("password");
   });
 
-  it("throws CONFLICT when email/username already exists", async () => {
+  it("throws CONFLICT when email/username already exists (precheck)", async () => {
     const db = fakeDb({
       selectRows: [{ id: UUID2 }], // existing user found
     });
@@ -123,6 +128,54 @@ describe("auth.register", () => {
     ).rejects.toThrow(
       expect.objectContaining({ code: "CONFLICT" }),
     );
+  });
+
+  it("throws CONFLICT when INSERT races and yields a 23505 unique-violation", async () => {
+    // Simulate a concurrent duplicate: the precheck SELECT finds nothing, but the
+    // INSERT itself then throws SQLSTATE 23505 (the race window).
+    const pgUniqueViolation = Object.assign(new Error("duplicate key value"), {
+      code: "23505",
+    });
+    const db = fakeDb({
+      selectRows: [], // precheck passes
+      insertError: pgUniqueViolation,
+    });
+
+    const ctx: Context = { db, jwtSecret: TEST_SECRET, auth: stubAuth, user: null };
+    const caller = createCaller(ctx);
+
+    const err = await caller.auth
+      .register({
+        email: "race@example.com",
+        username: "racer",
+        password: "password123",
+      })
+      .catch((e: unknown) => e);
+
+    expect(err).toMatchObject({ code: "CONFLICT" });
+    // Must not expose which field — message should be generic
+    expect((err as { message: string }).message).toBe(
+      "Email or username is already taken",
+    );
+  });
+
+  it("re-throws non-23505 DB errors from INSERT without wrapping", async () => {
+    const dbErr = Object.assign(new Error("connection refused"), { code: "08006" });
+    const db = fakeDb({
+      selectRows: [],
+      insertError: dbErr,
+    });
+
+    const ctx: Context = { db, jwtSecret: TEST_SECRET, auth: stubAuth, user: null };
+    const caller = createCaller(ctx);
+
+    await expect(
+      caller.auth.register({
+        email: "err@example.com",
+        username: "erruser",
+        password: "password123",
+      }),
+    ).rejects.toThrow("connection refused");
   });
 });
 
@@ -332,7 +385,7 @@ describe("stores.create", () => {
     expect(result.userId).toBe(UUID7);
   });
 
-  it("throws CONFLICT when the user already has a store", async () => {
+  it("throws CONFLICT when the user already has a store (precheck)", async () => {
     const db = fakeDb({
       selectRows: [{ id: STORE_UUID1 }], // already has store
     });
@@ -350,6 +403,53 @@ describe("stores.create", () => {
     ).rejects.toThrow(
       expect.objectContaining({ code: "CONFLICT" }),
     );
+  });
+
+  it("throws CONFLICT when INSERT races and yields a 23505 unique-violation", async () => {
+    // Simulate a concurrent duplicate: precheck SELECT finds nothing, but the
+    // INSERT itself then throws SQLSTATE 23505 (the race window).
+    const pgUniqueViolation = Object.assign(new Error("duplicate key value"), {
+      code: "23505",
+    });
+    const db = fakeDb({
+      selectRows: [], // precheck passes
+      insertError: pgUniqueViolation,
+    });
+
+    const ctx: Context = {
+      db,
+      jwtSecret: TEST_SECRET,
+      auth: stubAuth,
+      user: { id: UUID7 },
+    };
+    const caller = createCaller(ctx);
+
+    const err = await caller.stores
+      .create({ name: "Concurrent Store" })
+      .catch((e: unknown) => e);
+
+    expect(err).toMatchObject({ code: "CONFLICT" });
+    expect((err as { message: string }).message).toBe("You already have a store.");
+  });
+
+  it("re-throws non-23505 DB errors from store INSERT without wrapping", async () => {
+    const dbErr = Object.assign(new Error("disk full"), { code: "53100" });
+    const db = fakeDb({
+      selectRows: [],
+      insertError: dbErr,
+    });
+
+    const ctx: Context = {
+      db,
+      jwtSecret: TEST_SECRET,
+      auth: stubAuth,
+      user: { id: UUID7 },
+    };
+    const caller = createCaller(ctx);
+
+    await expect(
+      caller.stores.create({ name: "Error Store" }),
+    ).rejects.toThrow("disk full");
   });
 
   it("throws UNAUTHORIZED when unauthenticated", async () => {

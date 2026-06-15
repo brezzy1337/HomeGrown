@@ -107,13 +107,13 @@ export default function App() {
   );
 
   return (
-    <AuthProvider>
-      <trpc.Provider client={trpcClient} queryClient={queryClient}>
-        <QueryClientProvider client={queryClient}>
+    <trpc.Provider client={trpcClient} queryClient={queryClient}>
+      <QueryClientProvider client={queryClient}>
+        <AuthProvider>
           <RootNavigator />
-        </QueryClientProvider>
-      </trpc.Provider>
-    </AuthProvider>
+        </AuthProvider>
+      </QueryClientProvider>
+    </trpc.Provider>
   );
 }
 

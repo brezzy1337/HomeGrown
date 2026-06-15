@@ -18,7 +18,7 @@ export const users = pgTable("users", {
   username: text("username").unique().notNull(),
   passwordHash: text("password_hash").notNull(),
   stripeCustomerId: text("stripe_customer_id"),
-  createdAt: timestamp("created_at").defaultNow(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
 });
 
 export const stores = pgTable("stores", {

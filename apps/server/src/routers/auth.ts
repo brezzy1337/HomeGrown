@@ -50,18 +50,37 @@ export const authRouter = router({
 
       const passwordHash = await ctx.auth.hashPassword(input.password);
 
-      const [newUser] = await ctx.db
-        .insert(users)
-        .values({
-          email: input.email,
-          username: input.username,
-          passwordHash,
-        })
-        .returning({
-          id: users.id,
-          email: users.email,
-          username: users.username,
-        });
+      let newUser: { id: string; email: string; username: string } | undefined;
+      try {
+        const [inserted] = await ctx.db
+          .insert(users)
+          .values({
+            email: input.email,
+            username: input.username,
+            passwordHash,
+          })
+          .returning({
+            id: users.id,
+            email: users.email,
+            username: users.username,
+          });
+        newUser = inserted;
+      } catch (err) {
+        // Postgres unique-violation (SQLSTATE 23505) means a concurrent duplicate
+        // slipped past the precheck SELECT — surface it as a clean CONFLICT.
+        if (
+          typeof err === "object" &&
+          err !== null &&
+          "code" in err &&
+          (err as { code: unknown }).code === "23505"
+        ) {
+          throw new TRPCError({
+            code: "CONFLICT",
+            message: "Email or username is already taken",
+          });
+        }
+        throw err;
+      }
 
       if (!newUser) {
         throw new TRPCError({

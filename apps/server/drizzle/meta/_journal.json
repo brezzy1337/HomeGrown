@@ -15,6 +15,13 @@
       "when": 1781563554275,
       "tag": "0001_organic_thunderbolt_ross",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1781567128971,
+      "tag": "0002_orange_legion",
+      "breakpoints": true
     }
   ]
 }

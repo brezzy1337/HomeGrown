@@ -38,6 +38,21 @@ describe("hashPassword / verifyPassword", () => {
     expect(await verifyPassword("any-password", "no-colon-here")).toBe(false);
   });
 
+  it("returns false when stored hash has empty salt (colon at position 0)", async () => {
+    // ":abc" — colonIndex === 0, so salt segment is empty
+    expect(await verifyPassword("x", ":abc")).toBe(false);
+  });
+
+  it("returns false when stored hash has empty hash segment (colon at end)", async () => {
+    // "abc:" — colonIndex === stored.length - 1, so hash segment is empty
+    expect(await verifyPassword("x", "abc:")).toBe(false);
+  });
+
+  it("returns false when stored value has no colon at all", async () => {
+    // "abc" — no colon, same as existing malformed test but named explicitly
+    expect(await verifyPassword("x", "abc")).toBe(false);
+  });
+
   it("returns false when password is empty string", async () => {
     const hash = await hashPassword("real-password");
     expect(await verifyPassword("", hash)).toBe(false);

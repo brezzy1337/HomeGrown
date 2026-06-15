@@ -21,6 +21,7 @@ import React, {
   useState,
 } from "react";
 import { createTRPCClient, httpBatchLink } from "@trpc/client";
+import { useQueryClient } from "@tanstack/react-query";
 import type { AppRouter } from "@homegrown/server";
 import type { SessionUser } from "@homegrown/shared";
 import { API_URL, setAuthToken } from "../api/trpc";
@@ -48,6 +49,7 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [status, setStatus] = useState<AuthStatus>("loading");
   const [user, setUser] = useState<SessionUser | null>(null);
+  const queryClient = useQueryClient();
 
   // Restore session on launch
   useEffect(() => {
@@ -109,7 +111,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setAuthToken(null);
     setUser(null);
     setStatus("signedOut");
-  }, []);
+    queryClient.clear();
+  }, [queryClient]);
 
   return (
     <AuthContext.Provider value={{ status, user, signIn, signOut }}>
