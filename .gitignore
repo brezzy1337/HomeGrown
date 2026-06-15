@@ -1,0 +1,41 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build output
+dist/
+build/
+*.tsbuildinfo
+
+# Secrets — NEVER commit. The legacy repo leaked credentials; all config is env-driven.
+.env
+.env.*
+!.env.example
+
+# Expo / React Native
+.expo/
+.expo-shared/
+apps/mobile/ios/
+apps/mobile/android/
+*.jks
+*.p8
+*.p12
+*.mobileprovision
+*.orig.*
+
+# Drizzle
+apps/server/drizzle/meta/_journal.json.lock
+
+# Test / coverage
+coverage/
+.vitest/
+
+# Claude Code — local config, not shared
+.claude/
+
+# Editor / OS
+.DS_Store
+*.log
+.idea/
+.vscode/*
+!.vscode/extensions.json

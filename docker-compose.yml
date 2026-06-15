@@ -1,0 +1,24 @@
+# Local dev infrastructure. Production Postgres is GCP Cloud SQL (PostGIS-enabled).
+# Bring up:  docker compose up -d
+# Tear down: docker compose down        (add -v to wipe the volume)
+services:
+  db:
+    image: postgis/postgis:16-3.4
+    container_name: homegrown-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: homegrown
+      POSTGRES_PASSWORD: homegrown
+      POSTGRES_DB: homegrown
+    ports:
+      - "5432:5432"
+    volumes:
+      - homegrown-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U homegrown -d homegrown"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  homegrown-db-data:

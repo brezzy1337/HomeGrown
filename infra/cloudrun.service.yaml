@@ -1,0 +1,59 @@
+# Cloud Run service definition — HomeGrown server (Milestone 1)
+#
+# TEMPLATE: Replace every <PLACEHOLDER> before use. Do not commit real
+# project IDs, regions, or account emails if your repo is public.
+#
+# Usage:
+#   gcloud run services replace infra/cloudrun.service.yaml --region=<REGION>
+#
+# IMPORTANT: No secrets belong in this file. DATABASE_URL and future keys
+# are referenced by name from Secret Manager and injected at runtime only.
+
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: homegrown-server
+  # Replace with your GCP region (e.g. us-central1)
+  annotations:
+    run.googleapis.com/launch-stage: GA
+
+spec:
+  template:
+    metadata:
+      annotations:
+        # Cloud SQL connector: attach the PostGIS instance as a sidecar.
+        # Format: <PROJECT_ID>:<REGION>:<INSTANCE_ID>
+        run.googleapis.com/cloudsql-instances: "<PROJECT_ID>:<REGION>:<INSTANCE_ID>"
+
+        # Autoscaling — start conservatively for the pilot.
+        autoscaling.knative.dev/minScale: "0"
+        autoscaling.knative.dev/maxScale: "10"
+
+    spec:
+      # Service account that has secretAccessor on each secret referenced below.
+      serviceAccountName: "<SERVICE_ACCOUNT_EMAIL>"
+
+      containers:
+        - image: "<REGION>-docker.pkg.dev/<PROJECT_ID>/homegrown/server:latest"
+          # Cloud Run injects PORT=8080 automatically; the server reads it from env.
+          ports:
+            - containerPort: 8080
+
+          env:
+            - name: NODE_ENV
+              value: production
+
+            # DATABASE_URL — injected from Secret Manager; never hardcoded.
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  # Secret name in Secret Manager
+                  name: DATABASE_URL
+                  key: latest
+
+          resources:
+            limits:
+              cpu: "1"
+              memory: 512Mi
+
+      timeoutSeconds: 30

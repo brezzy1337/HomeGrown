@@ -1,0 +1,14 @@
+# Docker build context = repo root. Keep the image lean and secret-free.
+**/node_modules
+**/dist
+**/build
+**/.expo
+**/coverage
+**/.git
+**/.github
+.env
+.env.*
+!.env.example
+apps/mobile
+*.log
+.DS_Store
