@@ -15,6 +15,7 @@
 import React, { useState } from "react";
 import {
   ActivityIndicator,
+  Alert,
   FlatList,
   Pressable,
   SafeAreaView,
@@ -23,9 +24,10 @@ import {
   View,
 } from "react-native";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
-import { listingCategory, type ListingCategory } from "@homegrown/shared";
+import { listingCategory, type ListingCategory, type NearbyListing } from "@homegrown/shared";
 import { trpc } from "../api/trpc";
 import { useAuth } from "../auth/AuthContext";
+import { useCart } from "../cart/CartContext";
 import { useDeviceLocation } from "../location/useDeviceLocation";
 import type { AuthedStackParamList } from "../navigation/types";
 import { capitalise } from "../utils/text";
@@ -48,8 +50,15 @@ const FILTER_OPTIONS: { label: string; value: FilterCategory }[] = [
 // BrowseView — rendered once coords are available
 // ---------------------------------------------------------------------------
 
-function BrowseView({ lat, lng }: { lat: number; lng: number }) {
+type BrowseViewProps = {
+  lat: number;
+  lng: number;
+};
+
+function BrowseView({ lat, lng }: BrowseViewProps) {
   const [activeCategory, setActiveCategory] = useState<FilterCategory>("all");
+  // Track which listing was just added for brief visual feedback
+  const [justAdded, setJustAdded] = useState<string | null>(null);
 
   const category: ListingCategory | undefined =
     activeCategory === "all" ? undefined : activeCategory;
@@ -58,6 +67,40 @@ function BrowseView({ lat, lng }: { lat: number; lng: number }) {
     { lat, lng, radiusKm: 25, category },
     { enabled: true },
   );
+
+  const { addItem, clearCart } = useCart();
+
+  function handleAddItem(item: NearbyListing) {
+    const result = addItem(item);
+    if (result.ok) {
+      // Brief "Added" feedback — reset after 1.5 s
+      setJustAdded(item.id);
+      setTimeout(() => setJustAdded((prev) => (prev === item.id ? null : prev)), 1500);
+    } else if (result.reason === "different-store") {
+      Alert.alert(
+        "Start a new cart?",
+        `Your cart has items from ${result.cartStoreName}. Starting a new cart will remove them.\n\nSwitch to ${item.storeName}?`,
+        [
+          { text: "Cancel", style: "cancel" },
+          {
+            text: "Start new cart",
+            style: "destructive",
+            onPress: () => {
+              clearCart();
+              const retry = addItem(item);
+              if (retry.ok) {
+                setJustAdded(item.id);
+                setTimeout(
+                  () => setJustAdded((prev) => (prev === item.id ? null : prev)),
+                  1500,
+                );
+              }
+            },
+          },
+        ],
+      );
+    }
+  }
 
   return (
     <View style={styles.browseContainer}>
@@ -115,20 +158,32 @@ function BrowseView({ lat, lng }: { lat: number; lng: number }) {
           keyExtractor={(item) => item.id}
           contentContainerStyle={styles.listContent}
           scrollEnabled={false}
-          renderItem={({ item }) => (
-            <View style={styles.listingCard}>
-              <View style={styles.listingRow}>
-                <Text style={styles.listingName}>{item.name}</Text>
-                <Text style={styles.listingDistance}>{item.distanceKm.toFixed(1)} km</Text>
+          renderItem={({ item }) => {
+            const added = justAdded === item.id;
+            return (
+              <View style={styles.listingCard}>
+                <View style={styles.listingRow}>
+                  <Text style={styles.listingName}>{item.name}</Text>
+                  <Text style={styles.listingDistance}>{item.distanceKm.toFixed(1)} km</Text>
+                </View>
+                <Text style={styles.listingPrice}>
+                  ${formatCents(item.priceCents)} / {item.unit}
+                </Text>
+                <Text style={styles.listingMeta}>
+                  {capitalise(item.category)} · {item.storeName}
+                </Text>
+                <Pressable
+                  style={[styles.addButton, added ? styles.addButtonAdded : null]}
+                  onPress={() => handleAddItem(item)}
+                  disabled={item.quantity === 0}
+                >
+                  <Text style={styles.addButtonText}>
+                    {item.quantity === 0 ? "Sold out" : added ? "Added" : "Add"}
+                  </Text>
+                </Pressable>
               </View>
-              <Text style={styles.listingPrice}>
-                ${formatCents(item.priceCents)} / {item.unit}
-              </Text>
-              <Text style={styles.listingMeta}>
-                {capitalise(item.category)} · {item.storeName}
-              </Text>
-            </View>
-          )}
+            );
+          }}
         />
       ) : null}
     </View>
@@ -141,6 +196,7 @@ function BrowseView({ lat, lng }: { lat: number; lng: number }) {
 
 export function HomeScreen({ navigation }: Props) {
   const { user, signOut } = useAuth();
+  const { itemCount } = useCart();
   const location = useDeviceLocation();
 
   return (
@@ -152,6 +208,22 @@ export function HomeScreen({ navigation }: Props) {
           {user ? <Text style={styles.greeting}>Hi, {user.username}</Text> : null}
         </View>
         <View style={styles.headerActions}>
+          {/* Cart button with item-count badge */}
+          <Pressable
+            style={styles.cartButton}
+            onPress={() => navigation.navigate("Cart")}
+          >
+            <Text style={styles.cartButtonText}>
+              Cart{itemCount > 0 ? ` (${itemCount})` : ""}
+            </Text>
+          </Pressable>
+          {/* Orders button */}
+          <Pressable
+            style={styles.ordersButton}
+            onPress={() => navigation.navigate("Orders")}
+          >
+            <Text style={styles.ordersButtonText}>Orders</Text>
+          </Pressable>
           <Pressable style={styles.standButton} onPress={() => navigation.navigate("YourStand")}>
             <Text style={styles.standButtonText}>Your Stand</Text>
           </Pressable>
@@ -227,26 +299,50 @@ const styles = StyleSheet.create({
     gap: 8,
     alignItems: "center",
   },
-  standButton: {
+  cartButton: {
     backgroundColor: "#2d6a4f",
     paddingVertical: 8,
-    paddingHorizontal: 14,
+    paddingHorizontal: 12,
     borderRadius: 8,
   },
-  standButtonText: {
+  cartButtonText: {
     color: "#fff",
     fontSize: 13,
     fontWeight: "600",
   },
-  signOutButton: {
+  ordersButton: {
     borderWidth: 1,
     borderColor: "#2d6a4f",
     paddingVertical: 8,
     paddingHorizontal: 12,
     borderRadius: 8,
   },
-  signOutText: {
+  ordersButtonText: {
     color: "#2d6a4f",
+    fontSize: 13,
+    fontWeight: "600",
+  },
+  standButton: {
+    borderWidth: 1,
+    borderColor: "#2d6a4f",
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    borderRadius: 8,
+  },
+  standButtonText: {
+    color: "#2d6a4f",
+    fontSize: 13,
+    fontWeight: "600",
+  },
+  signOutButton: {
+    borderWidth: 1,
+    borderColor: "#ccc",
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+  },
+  signOutText: {
+    color: "#888",
     fontSize: 13,
     fontWeight: "600",
   },
@@ -353,6 +449,22 @@ const styles = StyleSheet.create({
   retryText: {
     color: "#2d6a4f",
     fontSize: 14,
+    fontWeight: "600",
+  },
+  addButton: {
+    marginTop: 10,
+    alignSelf: "flex-start",
+    backgroundColor: "#2d6a4f",
+    paddingVertical: 6,
+    paddingHorizontal: 16,
+    borderRadius: 6,
+  },
+  addButtonAdded: {
+    backgroundColor: "#52b788",
+  },
+  addButtonText: {
+    color: "#fff",
+    fontSize: 13,
     fontWeight: "600",
   },
 });
