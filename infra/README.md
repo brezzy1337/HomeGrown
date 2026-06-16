@@ -78,14 +78,8 @@ docker push "${IMAGE}:$(git rev-parse --short HEAD)"
 docker push "${IMAGE}:latest"
 ```
 
-Or trigger Cloud Build (no local Docker required):
-
-```bash
-gcloud builds submit \
-  --config infra/cloudbuild.yaml \
-  --substitutions=_IMAGE="${IMAGE}" \
-  .
-```
+Automated builds and deploys are handled by the GitHub Actions pipeline — see
+**§ 7. CI/CD — automated deploy (GitHub Actions)** below.
 
 ---
 
@@ -248,8 +242,10 @@ gcloud run services replace infra/cloudrun.service.yaml --region=<REGION>
 URL=$(gcloud run services describe homegrown-server \
         --region=<REGION> --format="value(status.url)")
 
-curl "${URL}/health/ping"
-# Expected: {"result":{"data":{"ok":true,...}}}
+curl "${URL}/health.ping"
+# Expected: {"result":{"data":{"status":"ok","service":"homegrown-server",...}}}
+# NOTE: the path is the tRPC procedure "health.ping" (dot), served at the root —
+# NOT "/health/ping" and NOT under a "/trpc" prefix.
 ```
 
 ---
@@ -267,6 +263,189 @@ curl "${URL}/health/ping"
 | `STRIPE_WEBHOOK_SECRET` | Secret Manager (`--set-secrets`) | Stripe webhook signing secret (`whsec_…`); see §3 |
 
 All secrets follow the same `--set-secrets` / `secretKeyRef` pattern — no secret value ever appears in code, config, or the container image.
+
+---
+
+## 7. CI/CD — automated deploy (GitHub Actions)
+
+The workflow at `.github/workflows/deploy.yml` runs on every push to `main` (and
+on `workflow_dispatch`). It is **inert until you set `DEPLOY_ENABLED = true`** in
+the repository's Actions variables — this lets you merge the PR without triggering
+a deploy before GCP provisioning is complete.
+
+### How the pipeline works
+
+1. **build-and-push** — authenticates to GCP via Workload Identity Federation
+   (keyless, no long-lived SA JSON key), builds the image for `linux/amd64`, and
+   pushes it to Artifact Registry with both a `sha`-pinned tag and `:latest`.
+
+2. **deploy** — waits for `build-and-push` to succeed, then waits for a human
+   approval via the **`production` GitHub Environment** (required reviewers). Once
+   approved it:
+   - Starts the Cloud SQL Auth Proxy and runs `pnpm --filter @homegrown/server
+     db:migrate` against a TCP connection to Cloud SQL (the proxy authenticates
+     with the same WIF credentials).
+   - Calls `gcloud run deploy` with the sha-pinned image, mirroring § 5 exactly.
+   - Smoke-tests `GET /health/ping` and fails the job if the response is not 2xx.
+
+### One-time GCP setup
+
+Complete every step in §§ 1–5 first, then do the following.
+
+#### A. Workload Identity Federation
+
+Create the identity pool (once per project):
+
+```bash
+gcloud iam workload-identity-pools create github-actions \
+  --project=<PROJECT_ID> \
+  --location=global \
+  --display-name="GitHub Actions"
+```
+
+Create the OIDC provider inside that pool:
+
+```bash
+gcloud iam workload-identity-pools providers create-oidc github \
+  --project=<PROJECT_ID> \
+  --location=global \
+  --workload-identity-pool=github-actions \
+  --display-name="GitHub OIDC" \
+  --issuer-uri="https://token.actions.githubusercontent.com" \
+  --attribute-mapping="google.subject=assertion.sub,attribute.repository=assertion.repository" \
+  --attribute-condition="attribute.repository=='<GITHUB_ORG>/<GITHUB_REPO>'"
+```
+
+The `attribute.repository` condition scopes trust to **this repo only** — no
+other repo in the GitHub org can impersonate the deploy SA.
+
+Record the full provider resource name for later:
+
+```bash
+gcloud iam workload-identity-pools providers describe github \
+  --project=<PROJECT_ID> \
+  --location=global \
+  --workload-identity-pool=github-actions \
+  --format="value(name)"
+# Output looks like:
+# projects/<PROJECT_NUMBER>/locations/global/workloadIdentityPools/github-actions/providers/github
+```
+
+#### B. Deploy service account and least-privilege roles
+
+```bash
+# Create the SA that GitHub Actions will impersonate.
+gcloud iam service-accounts create homegrown-deploy \
+  --project=<PROJECT_ID> \
+  --display-name="HomeGrown CI deploy SA"
+
+DEPLOY_SA="homegrown-deploy@<PROJECT_ID>.iam.gserviceaccount.com"
+
+# Push images to Artifact Registry.
+gcloud projects add-iam-policy-binding <PROJECT_ID> \
+  --member="serviceAccount:${DEPLOY_SA}" \
+  --role="roles/artifactregistry.writer"
+
+# Create and update Cloud Run services.
+gcloud projects add-iam-policy-binding <PROJECT_ID> \
+  --member="serviceAccount:${DEPLOY_SA}" \
+  --role="roles/run.developer"
+
+# Connect to Cloud SQL (required by the Auth Proxy migration step).
+gcloud projects add-iam-policy-binding <PROJECT_ID> \
+  --member="serviceAccount:${DEPLOY_SA}" \
+  --role="roles/cloudsql.client"
+
+# Read secrets from Secret Manager (MIGRATE_DATABASE_URL; the five runtime
+# secrets are read by the runtime SA — see § 3 and cross-reference below).
+gcloud projects add-iam-policy-binding <PROJECT_ID> \
+  --member="serviceAccount:${DEPLOY_SA}" \
+  --role="roles/secretmanager.secretAccessor"
+
+# Allow the deploy SA to deploy Cloud Run services *as* the runtime SA.
+# Without this, gcloud run deploy --service-account=<RUNTIME_SA> is denied.
+RUNTIME_SA="<RUNTIME_SERVICE_ACCOUNT_EMAIL>"
+gcloud iam service-accounts add-iam-policy-binding "${RUNTIME_SA}" \
+  --project=<PROJECT_ID> \
+  --member="serviceAccount:${DEPLOY_SA}" \
+  --role="roles/iam.serviceAccountUser"
+```
+
+Bind the GitHub Actions OIDC identity to the deploy SA:
+
+```bash
+WIF_POOL_ID="projects/<PROJECT_NUMBER>/locations/global/workloadIdentityPools/github-actions"
+
+gcloud iam service-accounts add-iam-policy-binding "${DEPLOY_SA}" \
+  --project=<PROJECT_ID> \
+  --role="roles/iam.workloadIdentityUser" \
+  --member="principalSet://iam.googleapis.com/${WIF_POOL_ID}/attribute.repository/<GITHUB_ORG>/<GITHUB_REPO>"
+```
+
+The `attribute.repository` principal set restricts this binding to pushes that
+originate from `<GITHUB_ORG>/<GITHUB_REPO>` — it cannot be broadened without an
+explicit IAM change.
+
+#### C. GitHub Environment — approval gate
+
+In the repository: **Settings → Environments → New environment**, name it
+`production`. Under **Protection rules**, enable **Required reviewers** and add the
+humans who must approve each deploy.  This is the gating mechanism referenced by
+`environment: production` in the deploy job.
+
+#### D. Actions variables to set
+
+In **Settings → Secrets and variables → Actions → Variables** (these are
+non-sensitive configuration values, not secrets):
+
+| Variable | Example value | Purpose |
+|---|---|---|
+| `DEPLOY_ENABLED` | `true` | Arms the pipeline; leave unset or `false` until GCP is ready |
+| `GCP_PROJECT_ID` | `homegrown-prod` | GCP project ID |
+| `GCP_REGION` | `us-central1` | Region for Cloud Run, Artifact Registry, Cloud SQL |
+| `GCP_AR_REPO` | `homegrown` | Artifact Registry repository name (created in § 1) |
+| `GCP_CLOUDSQL_INSTANCE` | `homegrown-db` | Cloud SQL instance name (created in § 4) |
+| `GCP_WIF_PROVIDER` | `projects/123.../providers/github` | Full WIF provider resource name from step A |
+| `GCP_DEPLOY_SA` | `homegrown-deploy@....iam.gserviceaccount.com` | Deploy SA email from step B |
+| `GCP_RUNTIME_SA` | `homegrown-server@....iam.gserviceaccount.com` | Runtime SA email (the one from § 3 / § 5) |
+
+#### E. MIGRATE_DATABASE_URL secret
+
+The migration step needs a TCP-form connection string so it can reach Cloud SQL
+through the Auth Proxy sidecar on `127.0.0.1:5432`.  This is **different from the
+runtime `DATABASE_URL`**, which uses the Cloud SQL Unix socket
+(`/cloudsql/<INSTANCE>`) and is only accessible inside a Cloud Run container.
+
+```bash
+# Replace USER, PASS, and DBNAME with the values for your Cloud SQL database.
+echo -n "postgres://USER:PASS@127.0.0.1:5432/DBNAME" \
+  | gcloud secrets create MIGRATE_DATABASE_URL \
+      --project=<PROJECT_ID> \
+      --data-file=-
+
+# Grant the deploy SA read access to this secret.
+gcloud secrets add-iam-policy-binding MIGRATE_DATABASE_URL \
+  --project=<PROJECT_ID> \
+  --member="serviceAccount:${DEPLOY_SA}" \
+  --role="roles/secretmanager.secretAccessor"
+```
+
+Why two separate secrets?
+
+- **`DATABASE_URL`** (runtime) — socket form; only valid inside Cloud Run where
+  the Cloud SQL connector sidecar creates the socket.  The runtime SA has
+  `secretAccessor` on it (granted in § 3).
+- **`MIGRATE_DATABASE_URL`** (CI only) — TCP form; used exclusively by the proxy
+  tunnel in GitHub Actions.  Keeping it separate means the migration credential
+  can be rotated or revoked independently and never touches the runtime container.
+
+#### F. Cross-reference: runtime SA secret permissions
+
+The runtime SA must hold `roles/secretmanager.secretAccessor` on the five runtime
+secrets (`DATABASE_URL`, `JWT_SECRET`, `GOOGLE_GEOCODING_API_KEY`,
+`STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`).  This is already documented and
+performed in § 3 — no additional action needed here, but verify it is done before
+arming `DEPLOY_ENABLED`.
 
 ---
 
