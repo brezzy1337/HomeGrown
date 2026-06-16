@@ -22,6 +22,12 @@ const envSchema = z.object({
    * No default — the process exits if this is missing or too short.
    */
   JWT_SECRET: z.string().min(32),
+  /**
+   * Google Geocoding API key for address → lat/lng resolution.
+   * Locally: set in .env (gitignored). Production: GCP Secret Manager.
+   * No default — never hardcode.
+   */
+  GOOGLE_GEOCODING_API_KEY: z.string().min(1),
 });
 
 const parsed = envSchema.safeParse(process.env);

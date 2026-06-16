@@ -19,6 +19,7 @@ import {
   signToken,
   verifyToken,
 } from "./auth";
+import { geocodeAddress } from "./geocode";
 
 const server = createHTTPServer({
   router: appRouter,
@@ -27,6 +28,7 @@ const server = createHTTPServer({
       db,
       jwtSecret: env.JWT_SECRET,
       auth: { hashPassword, verifyPassword, signToken, verifyToken },
+      geocode: (input) => geocodeAddress(input, env.GOOGLE_GEOCODING_API_KEY),
     }),
 });
 

@@ -117,3 +117,185 @@ export const store = z.object({
 });
 
 export type Store = z.infer<typeof store>;
+
+// ---------------------------------------------------------------------------
+// Listings — enums, CRUD inputs, and output shape
+// Consolidates the legacy PostedVegetables / PostedFruit / PostedHerbs triplet
+// into one table driven by `listingCategory`. Money is always integer cents.
+// ---------------------------------------------------------------------------
+
+/** The category of a produce listing. Drives filtering in `listings.nearby`. */
+export const listingCategory = z.enum([
+  "vegetable",
+  "fruit",
+  "herb",
+  "egg",
+  "honey",
+  "other",
+]);
+
+export type ListingCategory = z.infer<typeof listingCategory>;
+
+/** The sell-by unit for a listing quantity (e.g. "lb", "bunch"). */
+export const listingUnit = z.enum([
+  "each",
+  "lb",
+  "oz",
+  "bunch",
+  "dozen",
+  "jar",
+  "pint",
+  "quart",
+]);
+
+export type ListingUnit = z.infer<typeof listingUnit>;
+
+/**
+ * Input to `listings.create` (protected).
+ * `storeId` is intentionally absent — the server infers it from the caller's session.
+ */
+export const createListingInput = z.object({
+  name: z.string().min(1).max(120),
+  category: listingCategory,
+  /** Sale price in integer cents. Never a float. */
+  priceCents: z.number().int().positive(),
+  /** Available quantity. Zero means sold out; still visible. */
+  quantity: z.number().int().nonnegative(),
+  unit: listingUnit,
+  /** Category-specific extras, e.g. `{ dried: true }` for herbs. */
+  attributes: z.record(z.string(), z.unknown()).nullish(),
+});
+
+export type CreateListingInput = z.infer<typeof createListingInput>;
+
+/**
+ * Input to `listings.update` (protected, caller must own the store).
+ * All editable fields are optional — only supply the fields that change.
+ */
+export const updateListingInput = z.object({
+  listingId: z.string().uuid(),
+  name: z.string().min(1).max(120).optional(),
+  category: listingCategory.optional(),
+  /** Updated price in integer cents. Never a float. */
+  priceCents: z.number().int().positive().optional(),
+  quantity: z.number().int().nonnegative().optional(),
+  unit: listingUnit.optional(),
+  attributes: z.record(z.string(), z.unknown()).nullish(),
+});
+
+export type UpdateListingInput = z.infer<typeof updateListingInput>;
+
+/** Input to `listings.listByStore` (public). Returns all listings for a store. */
+export const listByStoreInput = z.object({
+  storeId: z.string().uuid(),
+});
+
+export type ListByStoreInput = z.infer<typeof listByStoreInput>;
+
+/**
+ * Public listing output returned by `listings.listByStore` and related procedures.
+ * `priceCents` is always an integer; never a float.
+ */
+export const listing = z.object({
+  id: z.string().uuid(),
+  storeId: z.string().uuid(),
+  name: z.string(),
+  category: listingCategory,
+  /** Price in integer cents. */
+  priceCents: z.number().int(),
+  quantity: z.number().int(),
+  unit: listingUnit,
+  /** Nullable JSONB extras (e.g. `{ dried: true }`). */
+  attributes: z.record(z.string(), z.unknown()).nullable(),
+  /** ISO 8601 timestamp. */
+  createdAt: z.string(),
+  /** ISO 8601 timestamp. */
+  updatedAt: z.string(),
+});
+
+export type Listing = z.infer<typeof listing>;
+
+// ---------------------------------------------------------------------------
+// Locations — typed address input + geocoded output
+// Address → PostGIS point conversion happens server-side in `geo.setStoreLocation`.
+// Clients never receive the raw `geography` column; they receive `lat`/`lng` floats.
+// ---------------------------------------------------------------------------
+
+/**
+ * Input to `geo.setStoreLocation` (protected, caller's store).
+ * The server geocodes the address to a PostGIS geography point — no geocoder
+ * details belong in this contract.
+ */
+export const setStoreLocationInput = z.object({
+  address: z.string().min(1).max(200),
+  city: z.string().min(1).max(100),
+  state: z.string().min(2).max(50),
+  /** Text, not integer — ZIP codes can have leading zeros. */
+  zip: z.string().min(3).max(12),
+});
+
+export type SetStoreLocationInput = z.infer<typeof setStoreLocationInput>;
+
+/**
+ * Store location output returned after geocoding.
+ * `lat`/`lng` are the client-visible coordinates derived from the PostGIS point —
+ * the raw `geography` column is never surfaced.
+ */
+export const location = z.object({
+  id: z.string().uuid(),
+  storeId: z.string().uuid(),
+  address: z.string(),
+  city: z.string(),
+  state: z.string(),
+  zip: z.string(),
+  lat: z.number(),
+  lng: z.number(),
+});
+
+export type Location = z.infer<typeof location>;
+
+// ---------------------------------------------------------------------------
+// Nearby — marketplace browse (§5 Geo)
+// Mobile supplies device GPS; server runs ST_DWithin + ST_Distance, caps at 50.
+// ---------------------------------------------------------------------------
+
+/**
+ * Input to `listings.nearby` (public).
+ * `lat`/`lng` come from `expo-location` on the device — no address entry needed to browse.
+ * `radiusKm` is capped at 200 km to prevent unbounded PostGIS scans.
+ */
+export const nearbyInput = z.object({
+  lat: z.number().min(-90).max(90),
+  lng: z.number().min(-180).max(180),
+  /** Search radius in kilometres. Maximum 200. */
+  radiusKm: z.number().positive().max(200),
+  /** Optional category filter applied before the PostGIS distance query. */
+  category: listingCategory.optional(),
+});
+
+export type NearbyInput = z.infer<typeof nearbyInput>;
+
+/**
+ * A single row returned by `listings.nearby`.
+ * Combines listing fields, store identity, and computed distance/location so the
+ * mobile browse screen can render pins and cards without a second round-trip.
+ */
+export const nearbyListing = z.object({
+  id: z.string().uuid(),
+  name: z.string(),
+  category: listingCategory,
+  /** Price in integer cents. */
+  priceCents: z.number().int(),
+  quantity: z.number().int(),
+  unit: listingUnit,
+  storeId: z.string().uuid(),
+  storeName: z.string(),
+  /** Computed by ST_Distance on the server; kilometres. */
+  distanceKm: z.number(),
+  /** Latitude of the store's PostGIS point. */
+  lat: z.number(),
+  /** Longitude of the store's PostGIS point. */
+  lng: z.number(),
+});
+
+export type NearbyListing = z.infer<typeof nearbyListing>;

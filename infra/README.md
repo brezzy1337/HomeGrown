@@ -125,6 +125,17 @@ gcloud sql connect homegrown-db --user=postgres
 # CREATE EXTENSION IF NOT EXISTS postgis_topology;
 ```
 
+**PostGIS extension and Cloud SQL permissions.** The Drizzle migration runs
+`CREATE EXTENSION IF NOT EXISTS postgis` automatically on first startup. On Cloud
+SQL this DDL requires a role that holds `cloudsqlsuperuser` membership (the
+default `postgres` user created with the instance has this role). If you connect
+as a lesser-privileged application user, grant the extension first as `postgres`
+(or any `cloudsqlsuperuser` member) before the migration runs — otherwise the
+migration step will fail with `ERROR: must be owner of extension postgis`. In
+practice: create the extension once manually via `gcloud sql connect` as shown
+above, then the `IF NOT EXISTS` guard makes subsequent migration runs safe under
+any role.
+
 The Cloud SQL **instance connection name** follows the pattern:
 `<PROJECT_ID>:<REGION>:<INSTANCE_ID>` — used in the connection URL and the
 `--add-cloudsql-instances` flag below.

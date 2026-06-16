@@ -30,6 +30,7 @@ import { HeroScreen } from "./src/screens/HeroScreen";
 import { LogInScreen } from "./src/screens/LogInScreen";
 import { SignUpScreen } from "./src/screens/SignUpScreen";
 import { HomeScreen } from "./src/screens/HomeScreen";
+import { YourStandScreen } from "./src/screens/YourStandScreen";
 import type {
   PreAuthStackParamList,
   AuthedStackParamList,
@@ -78,7 +79,12 @@ function RootNavigator() {
           <AuthedStack.Screen
             name="Home"
             component={HomeScreen}
-            options={{ title: "Home", headerBackVisible: false }}
+            options={{ headerShown: false }}
+          />
+          <AuthedStack.Screen
+            name="YourStand"
+            component={YourStandScreen}
+            options={{ title: "Your Stand" }}
           />
         </AuthedStack.Navigator>
       )}

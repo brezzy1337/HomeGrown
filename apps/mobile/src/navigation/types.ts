@@ -18,6 +18,7 @@ export type PreAuthStackParamList = {
 
 export type AuthedStackParamList = {
   Home: undefined;
+  YourStand: undefined;
 };
 
 // Convenience aliases

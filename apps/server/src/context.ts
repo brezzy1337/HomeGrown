@@ -1,8 +1,8 @@
 /**
  * tRPC request context.
  *
- * `createContext` accepts injected deps (`db`, `jwtSecret`, and `auth`) so that
- * the router import tree never touches `./env`, `./db/index`, or `./auth` —
+ * `createContext` accepts injected deps (`db`, `jwtSecret`, `auth`, and `geocode`)
+ * so that the router import tree never touches `./env`, `./db/index`, or `./auth` —
  * those modules have side-effects (env validation, DB connection, node:crypto)
  * that break mobile's typecheck and the env-free test invariant.
  *
@@ -32,6 +32,20 @@ export interface AuthHelpers {
   verifyToken(token: string, secret: string): Promise<string | null>;
 }
 
+/**
+ * Interface for geocoding an address to lat/lng.
+ * Defined here (not in geocode.ts) so routers can depend on the interface without
+ * pulling in the geocode module — which would break mobile's typecheck.
+ */
+export interface Geocoder {
+  (input: {
+    address: string;
+    city: string;
+    state: string;
+    zip: string;
+  }): Promise<{ lat: number; lng: number } | null>;
+}
+
 /** The database type — Drizzle + our schema. */
 export type Db = PostgresJsDatabase<typeof schema>;
 
@@ -40,6 +54,7 @@ export interface ContextDeps {
   db: Db;
   jwtSecret: string;
   auth: AuthHelpers;
+  geocode: Geocoder;
 }
 
 export async function createContext(
@@ -62,6 +77,7 @@ export async function createContext(
     db: deps.db,
     jwtSecret: deps.jwtSecret,
     auth: deps.auth,
+    geocode: deps.geocode,
     user,
   };
 }
