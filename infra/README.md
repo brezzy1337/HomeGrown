@@ -290,6 +290,20 @@ a deploy before GCP provisioning is complete.
 
 ### One-time GCP setup
 
+> **Automated setup:** `infra/scripts/gcp-bootstrap.sh` performs steps A–G below
+> end-to-end (idempotent — safe to re-run). Prerequisites: `gcloud` and `gh` on
+> PATH and authenticated, and `PROJECT_ID` exported. It does **not** create the
+> GCP project or link billing — both must exist first.
+>
+> ```bash
+> PROJECT_ID=my-gcp-project bash infra/scripts/gcp-bootstrap.sh
+> ```
+>
+> The script prints a final summary of computed values and the remaining manual
+> steps that cannot be automated (PostGIS DDL, Stripe webhook registration,
+> required reviewer setup, proxy SHA pin). The steps below remain the canonical
+> reference and fallback if you need to run any step individually.
+
 Complete every step in §§ 1–5 first, then do the following.
 
 #### A. Workload Identity Federation
