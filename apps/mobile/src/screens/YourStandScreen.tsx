@@ -5,11 +5,16 @@
  *   1. If the user has no store → show create-store form
  *      (createStoreInput: name, logo?, about?)
  *   2. Once a store exists:
- *      a. Location section: setStoreLocationInput (address, city, state, zip)
+ *      a. Payments section: Stripe Connect onboarding (FIRST priority)
+ *         connect.status.useQuery() + connect.createOnboardingLink.useMutation()
+ *         → opens Stripe hosted onboarding via expo-web-browser
+ *         → REFETCHES connect.status after browser closes (webhooks are truth)
+ *      b. Location section: setStoreLocationInput (address, city, state, zip)
  *         → geo.setStoreLocation.useMutation()
- *      b. Listings section: list existing + add-listing form
+ *      c. Listings section: list existing + add-listing form
  *         (createListingInput: name, category, priceCents, quantity, unit)
  *         Price entered in dollars → converted to integer cents before submit.
+ *         AddListingForm is GATED behind chargesEnabled; existing listings always show.
  *
  * Contracts from @homegrown/shared — never redeclared here.
  * No form library — useState + shared zod safeParse.
@@ -29,6 +34,7 @@ import {
   Text,
   View,
 } from "react-native";
+import * as WebBrowser from "expo-web-browser";
 import {
   createStoreInput,
   setStoreLocationInput,
@@ -49,6 +55,16 @@ import { formatCents } from "../utils/money";
 const CATEGORY_OPTIONS: readonly ListingCategory[] = listingCategory.options;
 
 const UNIT_OPTIONS: ListingUnit[] = ["each", "lb", "oz", "bunch", "dozen", "jar", "pint", "quart"];
+
+// ---------------------------------------------------------------------------
+// Stripe Connect return/refresh URLs
+// These are placeholder hosted-return pages. A real https return page is a
+// human prerequisite before polished QA — swap these for actual hosted pages
+// before going live.
+// ---------------------------------------------------------------------------
+
+const CONNECT_REFRESH_URL = "https://homegrown.app/connect/refresh";
+const CONNECT_RETURN_URL = "https://homegrown.app/connect/return";
 
 // ---------------------------------------------------------------------------
 // CreateStoreSection
@@ -144,6 +160,151 @@ function CreateStoreSection({ onCreated }: { onCreated: () => void }) {
           <Text style={styles.buttonText}>Create Stand</Text>
         )}
       </Pressable>
+    </View>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// PaymentsSection — Stripe Connect onboarding for sellers
+// Placed ABOVE LocationSection (payment setup is the seller's first priority).
+//
+// States:
+//   Not started (!detailsSubmitted): prompt + "Set up payments" button
+//   In progress (detailsSubmitted && !chargesEnabled): review message + "Continue setup"
+//   Ready (chargesEnabled): success card
+//
+// After the Stripe hosted onboarding browser closes, connect.status is REFETCHED.
+// The browser closing is NOT treated as success — the status booleans are the
+// authoritative source of truth (driven by the account.updated webhook).
+// ---------------------------------------------------------------------------
+
+function PaymentsSection() {
+  const utils = trpc.useUtils();
+  const [browserError, setBrowserError] = useState<string | null>(null);
+  const [isBrowserOpen, setIsBrowserOpen] = useState(false);
+
+  const {
+    data: status,
+    isLoading,
+    error,
+    refetch,
+  } = trpc.connect.status.useQuery();
+
+  const onboardingMutation = trpc.connect.createOnboardingLink.useMutation({
+    onSuccess: async (data) => {
+      setBrowserError(null);
+      setIsBrowserOpen(true);
+      try {
+        // Open Stripe hosted onboarding in an in-app browser.
+        // openBrowserAsync resolves when the user dismisses the browser —
+        // NOT necessarily after completing onboarding. Refetch status after
+        // close; the account.updated webhook is the source of truth.
+        await WebBrowser.openBrowserAsync(data.url);
+      } finally {
+        setIsBrowserOpen(false);
+        // Always refetch after browser closes — webhooks may have updated state.
+        void utils.connect.status.invalidate();
+      }
+    },
+    onError: (err) => {
+      setBrowserError(err.message ?? "Could not start onboarding. Try again.");
+    },
+  });
+
+  function handleSetupPress() {
+    setBrowserError(null);
+    onboardingMutation.mutate({
+      refreshUrl: CONNECT_REFRESH_URL,
+      returnUrl: CONNECT_RETURN_URL,
+    });
+  }
+
+  const isPending = onboardingMutation.isPending || isBrowserOpen;
+
+  return (
+    <View style={styles.section}>
+      <Text style={styles.sectionTitle}>Payments</Text>
+
+      {/* Loading state */}
+      {isLoading && <ActivityIndicator size="small" color="#2d6a4f" style={styles.loader} />}
+
+      {/* Error loading status */}
+      {error && !isLoading ? (
+        <View>
+          <Text style={styles.serverError}>Could not load payment status: {error.message}</Text>
+          <Pressable style={styles.retryButton} onPress={() => void refetch()}>
+            <Text style={styles.retryText}>Retry</Text>
+          </Pressable>
+        </View>
+      ) : null}
+
+      {/* Mutation error (opening onboarding link) */}
+      {browserError ? (
+        <View>
+          <Text style={styles.serverError}>{browserError}</Text>
+        </View>
+      ) : null}
+
+      {/* State: Ready — charges enabled */}
+      {status?.chargesEnabled ? (
+        <View style={styles.successCard}>
+          <Text style={styles.successText}>
+            Payments active — you can accept orders.
+            {status.payoutsEnabled ? " Payouts are also enabled." : ""}
+          </Text>
+        </View>
+      ) : null}
+
+      {/* State: In progress — details submitted but charges not yet enabled */}
+      {status && status.detailsSubmitted && !status.chargesEnabled ? (
+        <View>
+          <View style={styles.infoCard}>
+            <Text style={styles.infoCardTitle}>Payment setup in review</Text>
+            <Text style={styles.sectionSubtitle}>
+              Stripe is verifying your details. This usually takes a few minutes. You can continue
+              your setup or check back soon.
+            </Text>
+          </View>
+          <Pressable
+            style={[styles.button, isPending ? styles.buttonDisabled : null]}
+            onPress={handleSetupPress}
+            disabled={isPending}
+          >
+            {isPending ? (
+              <ActivityIndicator size="small" color="#fff" />
+            ) : (
+              <Text style={styles.buttonText}>Continue setup</Text>
+            )}
+          </Pressable>
+          <Pressable
+            style={styles.retryButton}
+            onPress={() => void refetch()}
+            disabled={isLoading}
+          >
+            <Text style={styles.retryText}>Refresh status</Text>
+          </Pressable>
+        </View>
+      ) : null}
+
+      {/* State: Not started — no details submitted yet */}
+      {status && !status.detailsSubmitted ? (
+        <View>
+          <Text style={styles.sectionSubtitle}>
+            Connect a payout account with Stripe to start selling.
+          </Text>
+          <Pressable
+            style={[styles.button, isPending ? styles.buttonDisabled : null]}
+            onPress={handleSetupPress}
+            disabled={isPending}
+          >
+            {isPending ? (
+              <ActivityIndicator size="small" color="#fff" />
+            ) : (
+              <Text style={styles.buttonText}>Set up payments</Text>
+            )}
+          </Pressable>
+        </View>
+      ) : null}
     </View>
   );
 }
@@ -413,9 +574,17 @@ function AddListingForm({ onAdded }: { onAdded: () => void }) {
 
 // ---------------------------------------------------------------------------
 // ListingsSection
+// chargesEnabled: when false, existing listings are shown read-only and
+// AddListingForm is replaced with a notice prompting payment setup.
 // ---------------------------------------------------------------------------
 
-function ListingsSection({ storeId }: { storeId: string }) {
+function ListingsSection({
+  storeId,
+  chargesEnabled,
+}: {
+  storeId: string;
+  chargesEnabled: boolean;
+}) {
   const utils = trpc.useUtils();
   const {
     data: listings,
@@ -459,23 +628,41 @@ function ListingsSection({ storeId }: { storeId: string }) {
           ))
         : null}
 
-      <AddListingForm onAdded={handleListingAdded} />
+      {/* Gate AddListingForm behind chargesEnabled. Show a notice when not enabled. */}
+      {chargesEnabled ? (
+        <AddListingForm onAdded={handleListingAdded} />
+      ) : (
+        <View style={styles.gateCard}>
+          <Text style={styles.gateCardText}>Set up payments to start listing produce.</Text>
+        </View>
+      )}
     </View>
   );
 }
 
 // ---------------------------------------------------------------------------
 // StoreView — shown once a store exists
+// Queries connect.status once here and passes chargesEnabled down to avoid
+// double-fetching (tRPC/react-query dedupes shared query keys, so a separate
+// useQuery call in PaymentsSection is also fine — we keep it separate there
+// for self-contained loading/error handling).
 // ---------------------------------------------------------------------------
 
 function StoreView({ storeId, storeName }: { storeId: string; storeName: string }) {
+  // connect.status is also queried inside PaymentsSection; react-query dedupes
+  // the request. We query it here too so ListingsSection can receive chargesEnabled
+  // without prop-drilling through PaymentsSection.
+  const { data: connectStatusData } = trpc.connect.status.useQuery();
+  const chargesEnabled = connectStatusData?.chargesEnabled ?? false;
+
   return (
     <>
       <View style={styles.storeHeader}>
         <Text style={styles.storeName}>{storeName}</Text>
       </View>
+      <PaymentsSection />
       <LocationSection />
-      <ListingsSection storeId={storeId} />
+      <ListingsSection storeId={storeId} chargesEnabled={chargesEnabled} />
     </>
   );
 }
@@ -580,6 +767,32 @@ const styles = StyleSheet.create({
     fontSize: 13,
     color: "#2d6a4f",
     fontWeight: "500",
+  },
+  infoCard: {
+    backgroundColor: "#fff8e1",
+    borderRadius: 8,
+    padding: 12,
+    marginBottom: 12,
+    borderLeftWidth: 3,
+    borderLeftColor: "#f59e0b",
+  },
+  infoCardTitle: {
+    fontSize: 14,
+    fontWeight: "700",
+    color: "#92400e",
+    marginBottom: 4,
+  },
+  gateCard: {
+    backgroundColor: "#f3f4f6",
+    borderRadius: 8,
+    padding: 14,
+    marginTop: 12,
+    alignItems: "center",
+  },
+  gateCardText: {
+    fontSize: 14,
+    color: "#6b7280",
+    textAlign: "center",
   },
   emptyText: {
     fontSize: 14,
@@ -693,6 +906,7 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     borderWidth: 1,
     borderColor: "#2d6a4f",
+    marginTop: 8,
   },
   retryText: {
     color: "#2d6a4f",

@@ -2,6 +2,7 @@
   "expo": {
     "name": "HomeGrown",
     "slug": "homegrown",
+    "scheme": "homegrown",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -27,6 +28,13 @@
         "expo-location",
         {
           "locationWhenInUsePermission": "HomeGrown uses your location to show nearby produce and farms."
+        }
+      ],
+      [
+        "@stripe/stripe-react-native",
+        {
+          "merchantIdentifier": "merchant.com.homegrown",
+          "enableGooglePay": false
         }
       ]
     ]
