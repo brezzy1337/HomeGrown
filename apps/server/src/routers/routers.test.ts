@@ -41,25 +41,58 @@ function fakeDb(opts: {
   selectSequence?: unknown[][];
   /** If set, the insert .returning() rejects with this error instead of resolving. */
   insertError?: unknown;
+  /** Rows returned by update().set().where().returning() */
+  updateRows?: unknown[];
+  /** Rows returned by select().from().innerJoin().where().limit() */
+  joinRows?: unknown[];
+  /** Allow multiple joins to return different rows in sequence */
+  joinSequence?: unknown[][];
 }) {
   let selectCallCount = 0;
+  let joinCallCount = 0;
 
   const selectFn = () => {
-    const rows =
-      opts.selectSequence
-        ? (opts.selectSequence[selectCallCount++] ?? [])
-        : (opts.selectRows ?? []);
+    const rows = opts.selectSequence
+      ? (opts.selectSequence[selectCallCount++] ?? [])
+      : (opts.selectRows ?? []);
 
-    const builder = {
+    // Make builder thenable so procedures can await it directly (without .limit())
+    // or call .limit() on it.
+    const builder: {
+      from: () => typeof builder;
+      where: () => typeof builder;
+      limit: () => Promise<unknown[]>;
+      innerJoin: () => {
+        where: () => { where: () => unknown; limit: () => Promise<unknown[]> };
+        limit: () => Promise<unknown[]>;
+      };
+      then: (resolve: (v: unknown[]) => void, reject: (e: unknown) => void) => void;
+    } = {
       from: () => builder,
       where: () => builder,
       limit: () => Promise.resolve(rows),
+      // Support innerJoin chaining — routes to joinRows/joinSequence
+      innerJoin: () => {
+        const joinRows = opts.joinSequence
+          ? (opts.joinSequence[joinCallCount++] ?? [])
+          : (opts.joinRows ?? []);
+        const joinBuilder = {
+          where: () => joinBuilder,
+          limit: () => Promise.resolve(joinRows),
+        };
+        return joinBuilder;
+      },
+      // Thenable: allow `await db.select().from().where()` without .limit()
+      then: (resolve: (v: unknown[]) => void, reject: (e: unknown) => void) => {
+        Promise.resolve(rows).then(resolve, reject);
+      },
     };
     return builder;
   };
 
   const insertBuilder = {
     values: () => insertBuilder,
+    onConflictDoUpdate: () => insertBuilder,
     returning: () =>
       opts.insertError !== undefined
         ? Promise.reject(opts.insertError)
@@ -67,7 +100,14 @@ function fakeDb(opts: {
   };
   const insertFn = () => insertBuilder;
 
-  return { select: selectFn, insert: insertFn } as unknown as Context["db"];
+  const updateBuilder = {
+    set: () => updateBuilder,
+    where: () => updateBuilder,
+    returning: () => Promise.resolve(opts.updateRows ?? []),
+  };
+  const updateFn = () => updateBuilder;
+
+  return { select: selectFn, insert: insertFn, update: updateFn } as unknown as Context["db"];
 }
 
 const TEST_SECRET = "test-jwt-secret-that-is-at-least-32-chars";
@@ -88,12 +128,16 @@ describe("auth.register", () => {
   it("happy path: creates user and returns token + session user", async () => {
     const db = fakeDb({
       selectRows: [], // no existing user
-      insertRows: [
-        { id: UUID1, email: "alice@example.com", username: "alice" },
-      ],
+      insertRows: [{ id: UUID1, email: "alice@example.com", username: "alice" }],
     });
 
-    const ctx: Context = { db, jwtSecret: TEST_SECRET, auth: stubAuth, user: null };
+    const ctx: Context = {
+      db,
+      jwtSecret: TEST_SECRET,
+      auth: stubAuth,
+      geocode: async () => null,
+      user: null,
+    };
     const caller = createCaller(ctx);
 
     const result = await caller.auth.register({
@@ -116,7 +160,13 @@ describe("auth.register", () => {
       selectRows: [{ id: UUID2 }], // existing user found
     });
 
-    const ctx: Context = { db, jwtSecret: TEST_SECRET, auth: stubAuth, user: null };
+    const ctx: Context = {
+      db,
+      jwtSecret: TEST_SECRET,
+      auth: stubAuth,
+      geocode: async () => null,
+      user: null,
+    };
     const caller = createCaller(ctx);
 
     await expect(
@@ -125,9 +175,7 @@ describe("auth.register", () => {
         username: "taken",
         password: "password123",
       }),
-    ).rejects.toThrow(
-      expect.objectContaining({ code: "CONFLICT" }),
-    );
+    ).rejects.toThrow(expect.objectContaining({ code: "CONFLICT" }));
   });
 
   it("throws CONFLICT when INSERT races and yields a 23505 unique-violation", async () => {
@@ -141,7 +189,13 @@ describe("auth.register", () => {
       insertError: pgUniqueViolation,
     });
 
-    const ctx: Context = { db, jwtSecret: TEST_SECRET, auth: stubAuth, user: null };
+    const ctx: Context = {
+      db,
+      jwtSecret: TEST_SECRET,
+      auth: stubAuth,
+      geocode: async () => null,
+      user: null,
+    };
     const caller = createCaller(ctx);
 
     const err = await caller.auth
@@ -154,9 +208,7 @@ describe("auth.register", () => {
 
     expect(err).toMatchObject({ code: "CONFLICT" });
     // Must not expose which field — message should be generic
-    expect((err as { message: string }).message).toBe(
-      "Email or username is already taken",
-    );
+    expect((err as { message: string }).message).toBe("Email or username is already taken");
   });
 
   it("re-throws non-23505 DB errors from INSERT without wrapping", async () => {
@@ -166,7 +218,13 @@ describe("auth.register", () => {
       insertError: dbErr,
     });
 
-    const ctx: Context = { db, jwtSecret: TEST_SECRET, auth: stubAuth, user: null };
+    const ctx: Context = {
+      db,
+      jwtSecret: TEST_SECRET,
+      auth: stubAuth,
+      geocode: async () => null,
+      user: null,
+    };
     const caller = createCaller(ctx);
 
     await expect(
@@ -199,7 +257,13 @@ describe("auth.login", () => {
       ],
     });
 
-    const ctx: Context = { db, jwtSecret: TEST_SECRET, auth: stubAuth, user: null };
+    const ctx: Context = {
+      db,
+      jwtSecret: TEST_SECRET,
+      auth: stubAuth,
+      geocode: async () => null,
+      user: null,
+    };
     const caller = createCaller(ctx);
 
     const result = await caller.auth.login({
@@ -226,7 +290,13 @@ describe("auth.login", () => {
       ],
     });
 
-    const ctx: Context = { db, jwtSecret: TEST_SECRET, auth: stubAuth, user: null };
+    const ctx: Context = {
+      db,
+      jwtSecret: TEST_SECRET,
+      auth: stubAuth,
+      geocode: async () => null,
+      user: null,
+    };
     const caller = createCaller(ctx);
 
     await expect(
@@ -234,15 +304,19 @@ describe("auth.login", () => {
         usernameOrEmail: "carol@example.com",
         password: "wrongpassword",
       }),
-    ).rejects.toThrow(
-      expect.objectContaining({ code: "UNAUTHORIZED" }),
-    );
+    ).rejects.toThrow(expect.objectContaining({ code: "UNAUTHORIZED" }));
   });
 
   it("throws UNAUTHORIZED when user not found", async () => {
     const db = fakeDb({ selectRows: [] });
 
-    const ctx: Context = { db, jwtSecret: TEST_SECRET, auth: stubAuth, user: null };
+    const ctx: Context = {
+      db,
+      jwtSecret: TEST_SECRET,
+      auth: stubAuth,
+      geocode: async () => null,
+      user: null,
+    };
     const caller = createCaller(ctx);
 
     await expect(
@@ -250,9 +324,7 @@ describe("auth.login", () => {
         usernameOrEmail: "nobody@example.com",
         password: "anything",
       }),
-    ).rejects.toThrow(
-      expect.objectContaining({ code: "UNAUTHORIZED" }),
-    );
+    ).rejects.toThrow(expect.objectContaining({ code: "UNAUTHORIZED" }));
   });
 });
 
@@ -263,15 +335,14 @@ describe("auth.login", () => {
 describe("auth.me", () => {
   it("returns the authenticated principal from a DB read", async () => {
     const db = fakeDb({
-      selectRows: [
-        { id: UUID5, email: "dave@example.com", username: "dave" },
-      ],
+      selectRows: [{ id: UUID5, email: "dave@example.com", username: "dave" }],
     });
 
     const ctx: Context = {
       db,
       jwtSecret: TEST_SECRET,
       auth: stubAuth,
+      geocode: async () => null,
       user: { id: UUID5 },
     };
     const caller = createCaller(ctx);
@@ -284,7 +355,13 @@ describe("auth.me", () => {
 
   it("throws UNAUTHORIZED when unauthenticated", async () => {
     const db = fakeDb({ selectRows: [] });
-    const ctx: Context = { db, jwtSecret: TEST_SECRET, auth: stubAuth, user: null };
+    const ctx: Context = {
+      db,
+      jwtSecret: TEST_SECRET,
+      auth: stubAuth,
+      geocode: async () => null,
+      user: null,
+    };
     const caller = createCaller(ctx);
 
     await expect(caller.auth.me()).rejects.toThrow(
@@ -300,7 +377,13 @@ describe("auth.me", () => {
 describe("stores.getMine", () => {
   it("throws UNAUTHORIZED when ctx.user is null", async () => {
     const db = fakeDb({ selectRows: [] });
-    const ctx: Context = { db, jwtSecret: TEST_SECRET, auth: stubAuth, user: null };
+    const ctx: Context = {
+      db,
+      jwtSecret: TEST_SECRET,
+      auth: stubAuth,
+      geocode: async () => null,
+      user: null,
+    };
     const caller = createCaller(ctx);
 
     await expect(caller.stores.getMine()).rejects.toThrow(
@@ -314,6 +397,7 @@ describe("stores.getMine", () => {
       db,
       jwtSecret: TEST_SECRET,
       auth: stubAuth,
+      geocode: async () => null,
       user: { id: UUID6 },
     };
     const caller = createCaller(ctx);
@@ -340,6 +424,7 @@ describe("stores.getMine", () => {
       db,
       jwtSecret: TEST_SECRET,
       auth: stubAuth,
+      geocode: async () => null,
       user: { id: UUID6 },
     };
     const caller = createCaller(ctx);
@@ -375,6 +460,7 @@ describe("stores.create", () => {
       db,
       jwtSecret: TEST_SECRET,
       auth: stubAuth,
+      geocode: async () => null,
       user: { id: UUID7 },
     };
     const caller = createCaller(ctx);
@@ -394,13 +480,12 @@ describe("stores.create", () => {
       db,
       jwtSecret: TEST_SECRET,
       auth: stubAuth,
+      geocode: async () => null,
       user: { id: UUID7 },
     };
     const caller = createCaller(ctx);
 
-    await expect(
-      caller.stores.create({ name: "Another Store" }),
-    ).rejects.toThrow(
+    await expect(caller.stores.create({ name: "Another Store" })).rejects.toThrow(
       expect.objectContaining({ code: "CONFLICT" }),
     );
   });
@@ -420,13 +505,12 @@ describe("stores.create", () => {
       db,
       jwtSecret: TEST_SECRET,
       auth: stubAuth,
+      geocode: async () => null,
       user: { id: UUID7 },
     };
     const caller = createCaller(ctx);
 
-    const err = await caller.stores
-      .create({ name: "Concurrent Store" })
-      .catch((e: unknown) => e);
+    const err = await caller.stores.create({ name: "Concurrent Store" }).catch((e: unknown) => e);
 
     expect(err).toMatchObject({ code: "CONFLICT" });
     expect((err as { message: string }).message).toBe("You already have a store.");
@@ -443,23 +527,375 @@ describe("stores.create", () => {
       db,
       jwtSecret: TEST_SECRET,
       auth: stubAuth,
+      geocode: async () => null,
       user: { id: UUID7 },
     };
     const caller = createCaller(ctx);
 
-    await expect(
-      caller.stores.create({ name: "Error Store" }),
-    ).rejects.toThrow("disk full");
+    await expect(caller.stores.create({ name: "Error Store" })).rejects.toThrow("disk full");
   });
 
   it("throws UNAUTHORIZED when unauthenticated", async () => {
     const db = fakeDb({ selectRows: [] });
-    const ctx: Context = { db, jwtSecret: TEST_SECRET, auth: stubAuth, user: null };
+    const ctx: Context = {
+      db,
+      jwtSecret: TEST_SECRET,
+      auth: stubAuth,
+      geocode: async () => null,
+      user: null,
+    };
+    const caller = createCaller(ctx);
+
+    await expect(caller.stores.create({ name: "Should Fail" })).rejects.toThrow(
+      expect.objectContaining({ code: "UNAUTHORIZED" }),
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Shared listing fixture data
+// ---------------------------------------------------------------------------
+
+const LISTING_UUID1 = "d1eebc99-9c0b-4ef8-bb6d-6bb9bd380b11";
+const LISTING_STORE_UUID = "e1eebc99-9c0b-4ef8-bb6d-6bb9bd380b22";
+const LISTING_USER_UUID = "f1eebc99-9c0b-4ef8-bb6d-6bb9bd380b33";
+const NOW_ISO = new Date("2026-01-01T00:00:00.000Z").toISOString();
+const NOW_DATE = new Date("2026-01-01T00:00:00.000Z");
+
+const BASE_LISTING = {
+  id: LISTING_UUID1,
+  storeId: LISTING_STORE_UUID,
+  name: "Tomatoes",
+  category: "vegetable" as const,
+  priceCents: 250,
+  quantity: 10,
+  unit: "lb" as const,
+  attributes: null,
+  createdAt: NOW_DATE,
+  updatedAt: NOW_DATE,
+};
+
+// ---------------------------------------------------------------------------
+// listings.create
+// ---------------------------------------------------------------------------
+
+describe("listings.create", () => {
+  it("happy path: creates a listing for the caller's store", async () => {
+    const db = fakeDb({
+      selectRows: [{ id: LISTING_STORE_UUID }], // store lookup
+      insertRows: [BASE_LISTING],
+    });
+
+    const ctx: Context = {
+      db,
+      jwtSecret: TEST_SECRET,
+      auth: stubAuth,
+      geocode: async () => null,
+      user: { id: LISTING_USER_UUID },
+    };
+    const caller = createCaller(ctx);
+
+    const result = await caller.listings.create({
+      name: "Tomatoes",
+      category: "vegetable",
+      priceCents: 250,
+      quantity: 10,
+      unit: "lb",
+    });
+
+    expect(result.id).toBe(LISTING_UUID1);
+    expect(result.name).toBe("Tomatoes");
+    expect(result.category).toBe("vegetable");
+    expect(result.priceCents).toBe(250);
+    expect(result.storeId).toBe(LISTING_STORE_UUID);
+    expect(result.createdAt).toBe(NOW_ISO);
+  });
+
+  it("throws NOT_FOUND when the user has no store", async () => {
+    const db = fakeDb({ selectRows: [] }); // no store
+
+    const ctx: Context = {
+      db,
+      jwtSecret: TEST_SECRET,
+      auth: stubAuth,
+      geocode: async () => null,
+      user: { id: LISTING_USER_UUID },
+    };
     const caller = createCaller(ctx);
 
     await expect(
-      caller.stores.create({ name: "Should Fail" }),
-    ).rejects.toThrow(
+      caller.listings.create({
+        name: "Tomatoes",
+        category: "vegetable",
+        priceCents: 250,
+        quantity: 10,
+        unit: "lb",
+      }),
+    ).rejects.toThrow(expect.objectContaining({ code: "NOT_FOUND" }));
+  });
+
+  it("throws UNAUTHORIZED when unauthenticated", async () => {
+    const db = fakeDb({ selectRows: [] });
+    const ctx: Context = {
+      db,
+      jwtSecret: TEST_SECRET,
+      auth: stubAuth,
+      geocode: async () => null,
+      user: null,
+    };
+    const caller = createCaller(ctx);
+
+    await expect(
+      caller.listings.create({
+        name: "Tomatoes",
+        category: "vegetable",
+        priceCents: 250,
+        quantity: 10,
+        unit: "lb",
+      }),
+    ).rejects.toThrow(expect.objectContaining({ code: "UNAUTHORIZED" }));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// listings.update
+// ---------------------------------------------------------------------------
+
+describe("listings.update", () => {
+  it("happy path: updates a listing the caller owns", async () => {
+    // joinRows = the listing+store ownership row
+    const db = fakeDb({
+      joinRows: [
+        {
+          id: LISTING_UUID1,
+          storeId: LISTING_STORE_UUID,
+          userId: LISTING_USER_UUID,
+        },
+      ],
+      updateRows: [{ ...BASE_LISTING, name: "Cherry Tomatoes", priceCents: 350 }],
+    });
+
+    const ctx: Context = {
+      db,
+      jwtSecret: TEST_SECRET,
+      auth: stubAuth,
+      geocode: async () => null,
+      user: { id: LISTING_USER_UUID },
+    };
+    const caller = createCaller(ctx);
+
+    const result = await caller.listings.update({
+      listingId: LISTING_UUID1,
+      name: "Cherry Tomatoes",
+      priceCents: 350,
+    });
+
+    expect(result.name).toBe("Cherry Tomatoes");
+    expect(result.priceCents).toBe(350);
+  });
+
+  it("throws FORBIDDEN when the caller does not own the listing's store", async () => {
+    const OTHER_USER = "aa11bc99-9c0b-4ef8-bb6d-6bb9bd380c99";
+    const db = fakeDb({
+      joinRows: [
+        {
+          id: LISTING_UUID1,
+          storeId: LISTING_STORE_UUID,
+          userId: OTHER_USER, // owned by someone else
+        },
+      ],
+    });
+
+    const ctx: Context = {
+      db,
+      jwtSecret: TEST_SECRET,
+      auth: stubAuth,
+      geocode: async () => null,
+      user: { id: LISTING_USER_UUID },
+    };
+    const caller = createCaller(ctx);
+
+    await expect(
+      caller.listings.update({ listingId: LISTING_UUID1, name: "Hacked" }),
+    ).rejects.toThrow(expect.objectContaining({ code: "FORBIDDEN" }));
+  });
+
+  it("throws NOT_FOUND when the listing does not exist", async () => {
+    const db = fakeDb({ joinRows: [] });
+
+    const ctx: Context = {
+      db,
+      jwtSecret: TEST_SECRET,
+      auth: stubAuth,
+      geocode: async () => null,
+      user: { id: LISTING_USER_UUID },
+    };
+    const caller = createCaller(ctx);
+
+    await expect(
+      caller.listings.update({ listingId: LISTING_UUID1, name: "Ghost" }),
+    ).rejects.toThrow(expect.objectContaining({ code: "NOT_FOUND" }));
+  });
+
+  it("throws UNAUTHORIZED when unauthenticated", async () => {
+    const db = fakeDb({ joinRows: [] });
+    const ctx: Context = {
+      db,
+      jwtSecret: TEST_SECRET,
+      auth: stubAuth,
+      geocode: async () => null,
+      user: null,
+    };
+    const caller = createCaller(ctx);
+
+    await expect(
+      caller.listings.update({ listingId: LISTING_UUID1, name: "Ghost" }),
+    ).rejects.toThrow(expect.objectContaining({ code: "UNAUTHORIZED" }));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// listings.listByStore
+// ---------------------------------------------------------------------------
+
+describe("listings.listByStore", () => {
+  it("returns an array of listings for a store", async () => {
+    const db = fakeDb({
+      selectRows: [
+        BASE_LISTING,
+        { ...BASE_LISTING, id: "bb22bc99-9c0b-4ef8-bb6d-6bb9bd380c11", name: "Basil" },
+      ],
+    });
+
+    const ctx: Context = {
+      db,
+      jwtSecret: TEST_SECRET,
+      auth: stubAuth,
+      geocode: async () => null,
+      user: null,
+    };
+    const caller = createCaller(ctx);
+
+    const result = await caller.listings.listByStore({ storeId: LISTING_STORE_UUID });
+    expect(result).toHaveLength(2);
+    expect(result[0]?.name).toBe("Tomatoes");
+    expect(result[1]?.name).toBe("Basil");
+  });
+
+  it("returns an empty array when the store has no listings", async () => {
+    const db = fakeDb({ selectRows: [] });
+
+    const ctx: Context = {
+      db,
+      jwtSecret: TEST_SECRET,
+      auth: stubAuth,
+      geocode: async () => null,
+      user: null,
+    };
+    const caller = createCaller(ctx);
+
+    const result = await caller.listings.listByStore({ storeId: LISTING_STORE_UUID });
+    expect(result).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// geo.setStoreLocation
+// ---------------------------------------------------------------------------
+
+describe("geo.setStoreLocation", () => {
+  const STORE_ID = "cc33bc99-9c0b-4ef8-bb6d-6bb9bd380d11";
+  const LOCATION_ID = "dd44bc99-9c0b-4ef8-bb6d-6bb9bd380d22";
+  const GEO_USER_ID = "ee55bc99-9c0b-4ef8-bb6d-6bb9bd380d33";
+
+  const locationInput = {
+    address: "100 Farm Rd",
+    city: "Springfield",
+    state: "IL",
+    zip: "62701",
+  };
+
+  it("happy path: geocodes address and upserts location", async () => {
+    const db = fakeDb({
+      selectRows: [{ id: STORE_ID }], // store lookup
+      insertRows: [
+        {
+          id: LOCATION_ID,
+          storeId: STORE_ID,
+          address: "100 Farm Rd",
+          city: "Springfield",
+          state: "IL",
+          zip: "62701",
+        },
+      ],
+    });
+
+    const ctx: Context = {
+      db,
+      jwtSecret: TEST_SECRET,
+      auth: stubAuth,
+      geocode: async () => ({ lat: 39.78, lng: -89.65 }),
+      user: { id: GEO_USER_ID },
+    };
+    const caller = createCaller(ctx);
+
+    const result = await caller.geo.setStoreLocation(locationInput);
+
+    expect(result.id).toBe(LOCATION_ID);
+    expect(result.storeId).toBe(STORE_ID);
+    expect(result.address).toBe("100 Farm Rd");
+    expect(result.lat).toBe(39.78);
+    expect(result.lng).toBe(-89.65);
+  });
+
+  it("throws BAD_REQUEST when geocoder returns null (address not found)", async () => {
+    const db = fakeDb({
+      selectRows: [{ id: STORE_ID }], // store exists
+    });
+
+    const ctx: Context = {
+      db,
+      jwtSecret: TEST_SECRET,
+      auth: stubAuth,
+      geocode: async () => null, // bad address
+      user: { id: GEO_USER_ID },
+    };
+    const caller = createCaller(ctx);
+
+    await expect(caller.geo.setStoreLocation(locationInput)).rejects.toThrow(
+      expect.objectContaining({ code: "BAD_REQUEST" }),
+    );
+  });
+
+  it("throws NOT_FOUND when the caller has no store", async () => {
+    const db = fakeDb({ selectRows: [] }); // no store
+
+    const ctx: Context = {
+      db,
+      jwtSecret: TEST_SECRET,
+      auth: stubAuth,
+      geocode: async () => ({ lat: 39.78, lng: -89.65 }),
+      user: { id: GEO_USER_ID },
+    };
+    const caller = createCaller(ctx);
+
+    await expect(caller.geo.setStoreLocation(locationInput)).rejects.toThrow(
+      expect.objectContaining({ code: "NOT_FOUND" }),
+    );
+  });
+
+  it("throws UNAUTHORIZED when unauthenticated", async () => {
+    const db = fakeDb({ selectRows: [] });
+    const ctx: Context = {
+      db,
+      jwtSecret: TEST_SECRET,
+      auth: stubAuth,
+      geocode: async () => null,
+      user: null,
+    };
+    const caller = createCaller(ctx);
+
+    await expect(caller.geo.setStoreLocation(locationInput)).rejects.toThrow(
       expect.objectContaining({ code: "UNAUTHORIZED" }),
     );
   });

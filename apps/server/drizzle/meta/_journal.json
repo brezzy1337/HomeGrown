@@ -22,6 +22,13 @@
       "when": 1781567128971,
       "tag": "0002_orange_legion",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1781568395266,
+      "tag": "0003_salty_warbound",
+      "breakpoints": true
     }
   ]
 }

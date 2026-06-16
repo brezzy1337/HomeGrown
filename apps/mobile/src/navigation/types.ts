@@ -18,14 +18,13 @@ export type PreAuthStackParamList = {
 
 export type AuthedStackParamList = {
   Home: undefined;
+  YourStand: undefined;
 };
 
 // Convenience aliases
-export type PreAuthNavigationProp =
-  NativeStackNavigationProp<PreAuthStackParamList>;
+export type PreAuthNavigationProp = NativeStackNavigationProp<PreAuthStackParamList>;
 
-export type AuthedNavigationProp =
-  NativeStackNavigationProp<AuthedStackParamList>;
+export type AuthedNavigationProp = NativeStackNavigationProp<AuthedStackParamList>;
 
 /**
  * @deprecated Use PreAuthStackParamList or AuthedStackParamList.
@@ -33,5 +32,4 @@ export type AuthedNavigationProp =
  */
 export type RootStackParamList = PreAuthStackParamList & AuthedStackParamList;
 
-export type RootStackNavigationProp =
-  NativeStackNavigationProp<RootStackParamList>;
+export type RootStackNavigationProp = NativeStackNavigationProp<RootStackParamList>;

@@ -18,11 +18,12 @@ import type { Context } from "./context";
 const createCaller = createCallerFactory(appRouter);
 
 // Minimal stub context that satisfies the Context shape.
-// health.ping does not use db, auth, or jwtSecret — passing typed no-ops is enough.
+// health.ping does not use db, auth, jwtSecret, or geocode — passing typed no-ops is enough.
 const stubCtx: Context = {
   db: {} as Context["db"],
   jwtSecret: "stub-secret-for-testing-only-32ch",
   auth: {} as Context["auth"],
+  geocode: async () => null,
   user: null,
 };
 

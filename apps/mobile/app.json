@@ -21,6 +21,14 @@
     "web": {
       "favicon": "./assets/favicon.png"
     },
-    "plugins": ["expo-secure-store"]
+    "plugins": [
+      "expo-secure-store",
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "HomeGrown uses your location to show nearby produce and farms."
+        }
+      ]
+    ]
   }
 }
