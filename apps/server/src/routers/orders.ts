@@ -252,11 +252,16 @@ export const ordersRouter = router({
       let clientSecret: string;
       let paymentIntentId: string;
       try {
+        // idempotencyKey = orderId: stable for the lifetime of this request, so the Stripe SDK's
+        // network retries (maxNetworkRetries) and any server-side re-invocation with the same
+        // orderId are de-duplicated by Stripe. It does NOT dedupe across separate client retries
+        // of orders.create — those mint a new orderId (defaultRandom) and produce a new key.
         const pi = await ctx.stripe.createPaymentIntent({
           amountCents: totalCents,
           applicationFeeCents,
           destinationAccountId: store.stripeConnectAccountId,
           metadata: { orderId },
+          idempotencyKey: orderId,
         });
         clientSecret = pi.clientSecret;
         paymentIntentId = pi.id;
