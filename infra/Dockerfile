@@ -5,7 +5,7 @@
 # Target platform: linux/amd64 (GCP Cloud Run)
 #
 # The builder stage installs deps and runs esbuild to produce a single
-# self-contained ESM bundle at apps/server/dist/index.js. The runtime
+# self-contained ESM bundle at apps/server/dist/index.mjs. The runtime
 # stage carries only Node + that one file — no tsx, no esbuild, no node_modules.
 #
 # NO SECRETS. Secrets (DATABASE_URL, Stripe keys, etc.) are injected at deploy
@@ -45,12 +45,12 @@ COPY packages/shared/ ./packages/shared/
 COPY apps/server/     ./apps/server/
 
 # ── Bundle ──────────────────────────────────────────────────────────────────
-# Produces apps/server/dist/index.js — a single self-contained ESM file that
+# Produces apps/server/dist/index.mjs — a single self-contained ESM file that
 # includes @homegrown/shared and all third-party deps. Plain `node` can run it.
 RUN pnpm --filter @homegrown/server build
 
 # ── Runtime stage ───────────────────────────────────────────────────────────
-FROM node:22.16.0-slim@sha256:1471ea646673136b8308550ac14b36d847ffb21c24bc31828279e443c924e488
+FROM node:22.16.0-slim@sha256:1471ea646673136b8308550ac14b36d847ffb21c24bc31828279e443c924e488 AS runtime
 
 # ca-certificates: required for TLS connections to Cloud SQL (Postgres) and
 # Stripe's API. Must be in the runtime image even though build tools are not.
@@ -66,7 +66,7 @@ ENV NODE_ENV=production
 WORKDIR /app
 
 # Copy only the single bundled file from the builder — nothing else.
-COPY --from=builder /app/apps/server/dist/index.js /app/index.js
+COPY --from=builder /app/apps/server/dist/index.mjs /app/index.mjs
 
 # Expose is documentation only; Cloud Run binds whatever PORT it injects.
 EXPOSE 8080
@@ -76,4 +76,4 @@ RUN addgroup --system --gid 1001 nodejs \
   && adduser --system --uid 1001 --ingroup nodejs server
 USER server
 
-CMD ["node", "/app/index.js"]
+CMD ["node", "/app/index.mjs"]
