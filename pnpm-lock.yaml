@@ -181,6 +181,9 @@ importers:
       drizzle-kit:
         specifier: 'catalog:'
         version: 0.31.10
+      esbuild:
+        specifier: 0.28.0
+        version: 0.28.0
       eslint:
         specifier: 'catalog:'
         version: 9.39.4
