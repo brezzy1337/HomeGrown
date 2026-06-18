@@ -129,3 +129,53 @@ it as a **decision + a short TEST spike first**, then a **server-only** `/code-t
 scoped to `stripe.ts` + `webhook.ts`. PaymentIntents do not change. TEST-mode
 Express accounts are disposable. Defer any requirements/restriction UI surfacing
 to a later iteration.
+
+## 8. Roadmap, benefits & deprecation (as of June 2026)
+
+Verified against current Stripe docs (June 2026). Stripe does not publish hard
+end-of-life timelines, so the deprecation read is directional, not a guarantee.
+
+### Availability / roadmap
+
+- Accounts v2 (`/v2/core/accounts`) is **GA for Connect** (still preview for some
+  adjacent areas, e.g. Global Payouts). Sources:
+  [API reference](https://docs.stripe.com/api/v2/core/accounts),
+  [Dec 2025 changelog](https://docs.stripe.com/changelog/clover/2025-12-15/accounts-v2).
+- **New platforms are recommended to use v2** — it is Stripe's strategic direction.
+- There is an adoption guide —
+  [Use the Accounts v2 API in your existing integration](https://docs.stripe.com/connect/accounts-v2/migrate-integration)
+  — and v2 can **manage accounts created via v1**. So it is code-level adoption
+  work, **not** an automated in-place "convert this Express account to v2" button.
+
+### Will v1 be deprecated?
+
+- **No announced sunset.** Stripe still supports Accounts v1 / Customers v1, and
+  its date-based versioning exists specifically to avoid forced v1→v2 migrations
+  (decade-old integrations still run). Sources:
+  [SDK versioning policy](https://docs.stripe.com/sdks/versioning),
+  [API versioning blog](https://stripe.com/blog/api-versioning).
+- Directional caveat: the v2 doc says Stripe **"discourages indefinitely
+  maintaining both Accounts API versions simultaneously"** — so v2 is the
+  long-term path, but with no deadline and no forced migration.
+- If a platform authenticates connected accounts via **OAuth**, Stripe says stay
+  on v1. (Not us — we use Express + account links.)
+
+### Benefits of v2 (and who they're for)
+
+v2's wins compound with platform *complexity*, which is why it reads as "for
+larger clients":
+
+- **Explicit responsibilities** — set liability / fees / dashboard /
+  requirement-collection independently instead of the opaque Express/Standard/Custom
+  bundle. (This is what enables our liability shift.)
+- **Unified accounts + customers** — one v2 account can be *both* a connected
+  account and a customer, with no separate `Customer` object / network cost.
+- **Capabilities-based + multi-product / international** — cleaner cross-product
+  (payments / treasury / issuing) and Global Payouts story.
+
+For a single-region MVP doing simple destination charges, most of these are
+**latent** — benefits you don't use yet — which is why deferring is correct. The
+two that would actually move the needle for HomeGrown are the **liability shift**
+and **unified buyer/seller identity** (a neighbor who both sells and buys is one
+v2 account, vs. a connected account + a separate Customer object in v1) — and both
+matter more at real scale than at MVP.
