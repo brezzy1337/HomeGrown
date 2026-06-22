@@ -13,6 +13,7 @@ import {
   createStoreInput,
   getStoreInput,
   store as storeSchema,
+  storeProfile,
 } from "@homegrown/shared";
 import { eq } from "drizzle-orm";
 import { publicProcedure, protectedProcedure, router } from "../trpc";
@@ -136,19 +137,19 @@ export const storesRouter = router({
 
   /**
    * Public store profile. Returns NOT_FOUND if the store doesn't exist.
+   * Only exposes the buyer-safe subset: id, name, logo, about.
+   * userId and stripeConnectAccountId are intentionally omitted.
    */
   get: publicProcedure
     .input(getStoreInput)
-    .output(storeSchema)
+    .output(storeProfile)
     .query(async ({ input, ctx }) => {
       const [found] = await ctx.db
         .select({
           id: stores.id,
-          userId: stores.userId,
           name: stores.name,
           logo: stores.logo,
           about: stores.about,
-          stripeConnectAccountId: stores.stripeConnectAccountId,
         })
         .from(stores)
         .where(eq(stores.id, input.storeId))
@@ -163,11 +164,9 @@ export const storesRouter = router({
 
       return {
         id: found.id,
-        userId: found.userId,
         name: found.name,
         logo: found.logo ?? null,
         about: found.about ?? null,
-        stripeConnectAccountId: found.stripeConnectAccountId ?? null,
       };
     }),
 });
