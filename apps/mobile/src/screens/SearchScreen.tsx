@@ -1,18 +1,19 @@
 /**
- * HomeScreen — marketplace browse.
+ * SearchScreen — full-text + category search over nearby listings.
  *
- * Shows nearby produce listings using device GPS (expo-location).
- * Category filter chips: All + Vegetable / Fruit / Herb / Egg / Honey / Other.
- * Each listing card: name, category, price, unit, distance, storeName.
- *
- * Header: username greeting + Search + Sign Out + Your Stand button.
- *
- * States covered: loading (location or query), granted, denied, error, empty.
+ * Features:
+ *   - Text search box debounced ~300 ms before driving the query.
+ *   - Category chip row: All + one chip per listingCategory value.
+ *   - Both filters combine (AND): text query + category pass together.
+ *   - Results rendered as ListingCard rows (shared with HomeScreen).
+ *   - Fixed radiusKm: 50 km (wider than the Home browse feed at 25 km).
+ *   - Location states mirrored from HomeScreen: loading, denied, error, granted.
+ *   - Query states: loading spinner, empty state, error + retry.
  *
  * React Native only — no DOM elements.
  */
 
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import {
   ActivityIndicator,
   FlatList,
@@ -20,54 +21,94 @@ import {
   SafeAreaView,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from "react-native";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { listingCategory, type ListingCategory } from "@homegrown/shared";
 import { trpc } from "../api/trpc";
-import { useAuth } from "../auth/AuthContext";
-import { useCart } from "../cart/CartContext";
 import { useDeviceLocation } from "../location/useDeviceLocation";
 import type { AuthedStackParamList } from "../navigation/types";
 import { capitalise } from "../utils/text";
 import { ListingCard } from "../components/ListingCard";
 
-type Props = NativeStackScreenProps<AuthedStackParamList, "Home">;
+type Props = NativeStackScreenProps<AuthedStackParamList, "Search">;
 
 // ---------------------------------------------------------------------------
-// Category filter bar
+// Constants
+// ---------------------------------------------------------------------------
+
+const RADIUS_KM = 50;
+const DEBOUNCE_MS = 300;
+
+// ---------------------------------------------------------------------------
+// Category filter options
 // ---------------------------------------------------------------------------
 
 type FilterCategory = ListingCategory | "all";
 
 const FILTER_OPTIONS: { label: string; value: FilterCategory }[] = [
   { label: "All", value: "all" },
-  ...listingCategory.options.map((cat) => ({ label: capitalise(cat), value: cat as FilterCategory })),
+  ...listingCategory.options.map((cat) => ({
+    label: capitalise(cat),
+    value: cat as FilterCategory,
+  })),
 ];
 
 // ---------------------------------------------------------------------------
-// BrowseView — rendered once coords are available
+// SearchView — rendered once coords are available
 // ---------------------------------------------------------------------------
 
-type BrowseViewProps = {
+type SearchViewProps = {
   lat: number;
   lng: number;
 };
 
-function BrowseView({ lat, lng }: BrowseViewProps) {
+function SearchView({ lat, lng }: SearchViewProps) {
+  const [inputText, setInputText] = useState("");
+  const [debouncedQuery, setDebouncedQuery] = useState<string | undefined>(undefined);
   const [activeCategory, setActiveCategory] = useState<FilterCategory>("all");
+
+  // Debounce the text input: copy to debouncedQuery after DEBOUNCE_MS of silence.
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      const trimmed = inputText.trim();
+      setDebouncedQuery(trimmed.length > 0 ? trimmed : undefined);
+    }, DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [inputText]);
 
   const category: ListingCategory | undefined =
     activeCategory === "all" ? undefined : activeCategory;
 
   const { data, isLoading, error, refetch } = trpc.listings.nearby.useQuery(
-    { lat, lng, radiusKm: 25, category },
+    {
+      lat,
+      lng,
+      radiusKm: RADIUS_KM,
+      query: debouncedQuery,
+      category,
+    },
     { enabled: true },
   );
 
   return (
-    <View style={styles.browseContainer}>
-      {/* Category filter chips */}
+    <View style={styles.container}>
+      {/* Search box */}
+      <View style={styles.searchBoxWrapper}>
+        <TextInput
+          style={styles.searchBox}
+          value={inputText}
+          onChangeText={setInputText}
+          placeholder="Search produce…"
+          placeholderTextColor="#aaa"
+          autoCorrect={false}
+          clearButtonMode="while-editing"
+          returnKeyType="search"
+        />
+      </View>
+
+      {/* Category chips */}
       <FlatList
         data={FILTER_OPTIONS}
         horizontal
@@ -94,33 +135,37 @@ function BrowseView({ lat, lng }: BrowseViewProps) {
         )}
       />
 
-      {/* Listings */}
-      {isLoading && (
+      {/* Loading */}
+      {isLoading ? (
         <ActivityIndicator size="large" color="#2d6a4f" style={styles.centeredLoader} />
-      )}
+      ) : null}
 
+      {/* Error */}
       {error ? (
         <View style={styles.centeredState}>
-          <Text style={styles.stateText}>Could not load listings: {error.message}</Text>
+          <Text style={styles.stateText}>Could not load results: {error.message}</Text>
           <Pressable style={styles.retryButton} onPress={() => void refetch()}>
             <Text style={styles.retryText}>Retry</Text>
           </Pressable>
         </View>
       ) : null}
 
+      {/* Empty state */}
       {!isLoading && !error && data && data.length === 0 ? (
         <View style={styles.centeredState}>
-          <Text style={styles.stateText}>No produce nearby.</Text>
-          <Text style={styles.stateSubText}>Check back soon or try a wider search.</Text>
+          <Text style={styles.stateText}>No produce found.</Text>
+          <Text style={styles.stateSubText}>
+            Try adjusting your search term or selecting a different category.
+          </Text>
         </View>
       ) : null}
 
+      {/* Results */}
       {data && data.length > 0 ? (
         <FlatList
           data={data}
           keyExtractor={(item) => item.id}
           contentContainerStyle={styles.listContent}
-          scrollEnabled={false}
           renderItem={({ item }) => <ListingCard item={item} />}
         />
       ) : null}
@@ -129,56 +174,15 @@ function BrowseView({ lat, lng }: BrowseViewProps) {
 }
 
 // ---------------------------------------------------------------------------
-// HomeScreen
+// SearchScreen
 // ---------------------------------------------------------------------------
 
-export function HomeScreen({ navigation }: Props) {
-  const { user, signOut } = useAuth();
-  const { itemCount } = useCart();
+export function SearchScreen(_props: Props) {
   const location = useDeviceLocation();
 
   return (
     <SafeAreaView style={styles.safeArea}>
-      {/* Header */}
-      <View style={styles.header}>
-        <View>
-          <Text style={styles.headerTitle}>HomeGrown</Text>
-          {user ? <Text style={styles.greeting}>Hi, {user.username}</Text> : null}
-        </View>
-        <View style={styles.headerActions}>
-          {/* Search entry point */}
-          <Pressable
-            style={styles.searchButton}
-            onPress={() => navigation.navigate("Search")}
-          >
-            <Text style={styles.searchButtonText}>Search</Text>
-          </Pressable>
-          {/* Cart button with item-count badge */}
-          <Pressable
-            style={styles.cartButton}
-            onPress={() => navigation.navigate("Cart")}
-          >
-            <Text style={styles.cartButtonText}>
-              Cart{itemCount > 0 ? ` (${itemCount})` : ""}
-            </Text>
-          </Pressable>
-          {/* Orders button */}
-          <Pressable
-            style={styles.ordersButton}
-            onPress={() => navigation.navigate("Orders")}
-          >
-            <Text style={styles.ordersButtonText}>Orders</Text>
-          </Pressable>
-          <Pressable style={styles.standButton} onPress={() => navigation.navigate("YourStand")}>
-            <Text style={styles.standButtonText}>Your Stand</Text>
-          </Pressable>
-          <Pressable style={styles.signOutButton} onPress={() => void signOut()}>
-            <Text style={styles.signOutText}>Sign Out</Text>
-          </Pressable>
-        </View>
-      </View>
-
-      {/* Body — state-driven */}
+      {/* Location: loading */}
       {location.status === "loading" ? (
         <View style={styles.centeredState}>
           <ActivityIndicator size="large" color="#2d6a4f" />
@@ -186,24 +190,29 @@ export function HomeScreen({ navigation }: Props) {
         </View>
       ) : null}
 
+      {/* Location: denied */}
       {location.status === "denied" ? (
         <View style={styles.centeredState}>
           <Text style={styles.stateText}>Location access denied.</Text>
           <Text style={styles.stateSubText}>
-            Enable location permissions in Settings to browse nearby produce.
+            Enable location permissions in Settings to search nearby produce.
           </Text>
         </View>
       ) : null}
 
+      {/* Location: error */}
       {location.status === "error" ? (
         <View style={styles.centeredState}>
           <Text style={styles.stateText}>Could not determine your location.</Text>
-          <Text style={styles.stateSubText}>Please check your device settings and try again.</Text>
+          <Text style={styles.stateSubText}>
+            Please check your device settings and try again.
+          </Text>
         </View>
       ) : null}
 
+      {/* Location ready — render search UI */}
       {location.status === "granted" && location.coords ? (
-        <BrowseView lat={location.coords.lat} lng={location.coords.lng} />
+        <SearchView lat={location.coords.lat} lng={location.coords.lng} />
       ) : null}
     </SafeAreaView>
   );
@@ -218,97 +227,27 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: "#f7f9f7",
   },
-  header: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    paddingHorizontal: 20,
-    paddingTop: 16,
-    paddingBottom: 12,
-    backgroundColor: "#fff",
-    borderBottomWidth: 1,
-    borderBottomColor: "#e8eae8",
-  },
-  headerTitle: {
-    fontSize: 22,
-    fontWeight: "bold",
-    color: "#2d6a4f",
-  },
-  greeting: {
-    fontSize: 13,
-    color: "#666",
-    marginTop: 2,
-  },
-  headerActions: {
-    flexDirection: "row",
-    gap: 8,
-    alignItems: "center",
-  },
-  cartButton: {
-    backgroundColor: "#2d6a4f",
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    borderRadius: 8,
-  },
-  cartButtonText: {
-    color: "#fff",
-    fontSize: 13,
-    fontWeight: "600",
-  },
-  ordersButton: {
-    borderWidth: 1,
-    borderColor: "#2d6a4f",
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    borderRadius: 8,
-  },
-  ordersButtonText: {
-    color: "#2d6a4f",
-    fontSize: 13,
-    fontWeight: "600",
-  },
-  standButton: {
-    borderWidth: 1,
-    borderColor: "#2d6a4f",
-    paddingVertical: 8,
-    paddingHorizontal: 14,
-    borderRadius: 8,
-  },
-  standButtonText: {
-    color: "#2d6a4f",
-    fontSize: 13,
-    fontWeight: "600",
-  },
-  signOutButton: {
-    borderWidth: 1,
-    borderColor: "#ccc",
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    borderRadius: 8,
-  },
-  signOutText: {
-    color: "#888",
-    fontSize: 13,
-    fontWeight: "600",
-  },
-  searchButton: {
-    borderWidth: 1,
-    borderColor: "#2d6a4f",
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    borderRadius: 8,
-  },
-  searchButtonText: {
-    color: "#2d6a4f",
-    fontSize: 13,
-    fontWeight: "600",
-  },
-  browseContainer: {
+  container: {
     flex: 1,
+  },
+  searchBoxWrapper: {
+    paddingHorizontal: 16,
+    paddingTop: 12,
+    paddingBottom: 4,
+  },
+  searchBox: {
+    backgroundColor: "#fff",
+    borderWidth: 1,
+    borderColor: "#ddd",
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    fontSize: 15,
+    color: "#1a1a1a",
   },
   filterBar: {
     paddingHorizontal: 16,
-    paddingVertical: 12,
+    paddingVertical: 10,
     gap: 8,
   },
   filterChip: {

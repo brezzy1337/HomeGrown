@@ -198,18 +198,30 @@ export const listingsRouter = router({
    *
    * PostGIS ST_DWithin filters by radius, ST_Distance computes the distance,
    * ordered ascending. Capped at 50 results. Optional category filter.
+   * Optional case-insensitive substring name search via `query` (ILIKE, parameterized).
    * Never does app-side distance math.
    */
   nearby: publicProcedure
     .input(nearbyInput)
     .output(nearbyListingSchema.array())
     .query(async ({ input, ctx }) => {
-      const { lat, lng, radiusKm, category } = input;
+      const { lat, lng, radiusKm, category, query } = input;
       const radiusMeters = radiusKm * 1000;
 
       // Build category filter clause — omit entirely when not supplied
       const categoryFilter = category
         ? sql`AND l.category = ${category}::"listing_category"`
+        : sql``;
+
+      // Build name filter clause — case-insensitive substring match.
+      // `query` is a bound parameter (no SQL injection). We ALSO escape the LIKE
+      // metacharacters %, _ and \ in the user value (with an explicit ESCAPE '\')
+      // so a `%`-laden query can't turn into a match-everything full-table scan on
+      // this unauthenticated endpoint — only the outer literal '%' wildcards do
+      // substring matching; the user's own %/_ are treated literally.
+      const escapedQuery = query?.replace(/[%_\\]/g, "\\$&");
+      const nameFilter = escapedQuery
+        ? sql`AND l.name ILIKE '%' || ${escapedQuery} || '%' ESCAPE '\'`
         : sql``;
 
       type NearbyRow = {
@@ -244,6 +256,7 @@ export const listingsRouter = router({
         JOIN locations loc ON loc.store_id = s.id
         WHERE ST_DWithin(loc.geog, ST_MakePoint(${lng}, ${lat})::geography, ${radiusMeters})
         ${categoryFilter}
+        ${nameFilter}
         ORDER BY ST_Distance(loc.geog, ST_MakePoint(${lng}, ${lat})::geography) ASC
         LIMIT 50
       `);
