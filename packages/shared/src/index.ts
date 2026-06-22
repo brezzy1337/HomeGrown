@@ -340,6 +340,13 @@ export const approveRefundInput = z.object({
 
 export type ApproveRefundInput = z.infer<typeof approveRefundInput>;
 
+/** Input to `orders.declineRefund` (protected, caller must own the store). */
+export const declineRefundInput = z.object({
+  orderId: z.string().uuid(),
+});
+
+export type DeclineRefundInput = z.infer<typeof declineRefundInput>;
+
 /** A fulfilled order item returned by `orders.get` / `orders.listMine`. */
 export const orderItemOutput = z.object({
   id: z.string().uuid(),
@@ -368,6 +375,8 @@ export const order = z.object({
   refundReason: z.string().nullable(),
   /** ISO 8601 datetime or null — set when the seller approves the refund. */
   refundApprovedAt: z.string().datetime().nullable(),
+  /** ISO 8601 datetime or null — set when the seller declines the refund request. */
+  refundDeclinedAt: z.string().datetime().nullable(),
   items: z.array(orderItemOutput),
   /** ISO 8601 datetime string. */
   createdAt: z.string().datetime(),
