@@ -1114,6 +1114,59 @@ describe("orders.approveRefund", () => {
       caller.orders.approveRefund({ orderId: UUID_ORDER_PAID }),
     ).rejects.toThrow(expect.objectContaining({ code: "PRECONDITION_FAILED" }));
   });
+
+  it("rejects with BAD_REQUEST on double-approve (refundApprovedAt already set) and does NOT call refundPayment a second time", async () => {
+    const refundPayment = vi.fn().mockResolvedValue({ id: "re_test", status: "succeeded", amountRefunded: 500 });
+
+    // Order already has refundApprovedAt set (already approved once)
+    const orderRow = makeOrderRow({
+      status: "paid",
+      refundRequestedAt: new Date("2026-06-20T10:00:00Z"),
+      refundApprovedAt: new Date("2026-06-21T08:00:00Z"),
+      storeUserId: UUID_SELLER,
+    });
+
+    const db = makeRefundDb({
+      selectSequence: [[orderRow]],
+    });
+
+    const ctx = makeRefundCtx(db, UUID_SELLER, { refundPayment });
+    const caller = createCaller(ctx);
+
+    await expect(
+      caller.orders.approveRefund({ orderId: UUID_ORDER_PAID }),
+    ).rejects.toThrow(
+      expect.objectContaining({ code: "BAD_REQUEST", message: expect.stringContaining("Refund already approved") }),
+    );
+
+    // Stripe must NOT have been called — the guard fires before the Stripe call
+    expect(refundPayment).not.toHaveBeenCalled();
+  });
+
+  it("rejects with BAD_REQUEST when order is in a non-refundable status (e.g. cancelled)", async () => {
+    const refundPayment = vi.fn();
+
+    const orderRow = makeOrderRow({
+      status: "cancelled",
+      refundRequestedAt: new Date("2026-06-20T10:00:00Z"),
+      refundApprovedAt: null,
+      storeUserId: UUID_SELLER,
+    });
+
+    const db = makeRefundDb({
+      selectSequence: [[orderRow]],
+    });
+
+    const ctx = makeRefundCtx(db, UUID_SELLER, { refundPayment });
+    const caller = createCaller(ctx);
+
+    await expect(
+      caller.orders.approveRefund({ orderId: UUID_ORDER_PAID }),
+    ).rejects.toThrow(expect.objectContaining({ code: "BAD_REQUEST" }));
+
+    // Stripe must not be called for a non-refundable-status order
+    expect(refundPayment).not.toHaveBeenCalled();
+  });
 });
 
 // ---------------------------------------------------------------------------

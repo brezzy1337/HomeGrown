@@ -23,7 +23,7 @@ import {
   type Order,
   type OrderItemOutput,
 } from "@homegrown/shared";
-import { eq, inArray, desc } from "drizzle-orm";
+import { eq, inArray, desc, and } from "drizzle-orm";
 import { protectedProcedure, router } from "../trpc";
 import { orders, orderItems, listings, stores } from "../db/schema";
 
@@ -511,7 +511,7 @@ export const ordersRouter = router({
           refundReason: input.reason ?? null,
           updatedAt: now,
         })
-        .where(eq(orders.id, input.orderId));
+        .where(and(eq(orders.id, input.orderId), eq(orders.buyerId, ctx.user.id)));
 
       // Re-fetch to return the authoritative post-update state
       const [updatedOrder] = await ctx.db
@@ -603,6 +603,10 @@ export const ordersRouter = router({
         });
       }
 
+      if (foundOrder.refundApprovedAt !== null) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "Refund already approved" });
+      }
+
       if (foundOrder.status !== "paid" && foundOrder.status !== "fulfilled") {
         throw new TRPCError({
           code: "BAD_REQUEST",
@@ -630,7 +634,7 @@ export const ordersRouter = router({
           refundApprovedAt: now,
           updatedAt: now,
         })
-        .where(eq(orders.id, input.orderId));
+        .where(and(eq(orders.id, input.orderId), eq(orders.storeId, foundOrder.storeId)));
 
       // Re-fetch to return the authoritative post-update state
       const [updatedOrder] = await ctx.db
