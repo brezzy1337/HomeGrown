@@ -184,16 +184,18 @@ function OrderRow({ order }: { order: Order }) {
 // ---------------------------------------------------------------------------
 
 export function StoreOrdersScreen(_props: Props) {
-  const { data: orders, isLoading, error, refetch } = trpc.orders.listForMyStore.useQuery(
-    undefined,
+  const { data, isLoading, error, refetch } = trpc.orders.listForMyStore.useQuery(
+    {},
     {
       refetchInterval: (query) => {
-        const data = query.state.data;
-        if (!data) return false;
-        return needsPolling(data) ? 3000 : false;
+        const result = query.state.data;
+        if (!result) return false;
+        return needsPolling(result.orders) ? 3000 : false;
       },
     },
   );
+
+  const orders = data?.orders;
 
   if (isLoading) {
     return (

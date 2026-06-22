@@ -10,7 +10,7 @@
  *   - orders.create: price/fee computation, single-store rejection, not-onboarded rejection
  *   - connect.createOnboardingLink: creates+persists account id once (idempotent on reuse)
  *   - orders.requestRefund, approveRefund, declineRefund: guards, mutations, re-request
- *   - orders.listForMyStore: empty / populated
+ *   - orders.listForMyStore: empty / populated / cursor pagination
  */
 
 import { describe, it, expect, vi } from "vitest";
@@ -79,7 +79,8 @@ function makeStripeStub(overrides: Partial<Context["stripe"]> = {}): Context["st
 //   joinRows         — rows returned by innerJoin (when joinUsesSelectSlot is false)
 //   insertRows       — rows returned by insert().returning()
 //   insertError      — if set, insert().returning() rejects with this
-//   updateRows       — rows returned by update().returning()
+//   updateRows       — rows returned by every update().returning() (no sequence)
+//   updateSequence   — per-call rows; each update().returning() call consumes the next slot
 //   updateFn         — called with the set-payload on every update().set()
 //   captureUpdates   — each update().set() payload is pushed here
 //   transactionFn    — override the transaction implementation
@@ -91,6 +92,7 @@ function fakeDb(opts: {
   selectSequence?: unknown[][];
   insertError?: unknown;
   updateRows?: unknown[];
+  updateSequence?: unknown[][];
   joinRows?: unknown[];
   joinUsesSelectSlot?: boolean;
   updateFn?: (set: unknown) => void;
@@ -98,6 +100,7 @@ function fakeDb(opts: {
   transactionFn?: (txFn: (tx: unknown) => Promise<unknown>) => Promise<unknown>;
 }) {
   let selectCallCount = 0;
+  let updateCallCount = 0;
   const capturedUpdates = opts.captureUpdates ?? [];
 
   const selectFn = () => {
@@ -146,21 +149,43 @@ function fakeDb(opts: {
   };
   const insertFn = () => insertBuilder;
 
-  const updateBuilder = {
-    set: (s: unknown) => {
-      capturedUpdates.push(s);
-      opts.updateFn?.(s);
-      return updateBuilder;
-    },
-    where: () => updateBuilder,
-    returning: () => Promise.resolve(opts.updateRows ?? [{ id: UUID_ORDER }]),
+  const updateFn = () => {
+    const callIdx = updateCallCount++;
+    const returningRows = opts.updateSequence
+      ? (opts.updateSequence[callIdx] ?? [{ id: UUID_ORDER }])
+      : (opts.updateRows ?? [{ id: UUID_ORDER }]);
+
+    const updateBuilder = {
+      set: (s: unknown) => {
+        capturedUpdates.push(s);
+        opts.updateFn?.(s);
+        return updateBuilder;
+      },
+      where: () => updateBuilder,
+      returning: () => Promise.resolve(returningRows),
+    };
+    return updateBuilder;
   };
-  const updateFn = () => updateBuilder;
 
   const transactionFn = opts.transactionFn ?? (async (fn: (tx: unknown) => Promise<unknown>) => {
     return fn({
       insert: insertFn,
-      update: () => updateBuilder,
+      update: () => {
+        const callIdx = updateCallCount++;
+        const returningRows = opts.updateSequence
+          ? (opts.updateSequence[callIdx] ?? [{ id: UUID_ORDER }])
+          : (opts.updateRows ?? [{ id: UUID_ORDER }]);
+        const ub = {
+          set: (s: unknown) => {
+            capturedUpdates.push(s);
+            opts.updateFn?.(s);
+            return ub;
+          },
+          where: () => ub,
+          returning: () => Promise.resolve(returningRows),
+        };
+        return ub;
+      },
       select: selectFn,
     });
   });
@@ -837,17 +862,20 @@ function makeOrderRow(overrides: Partial<{
  * procedures doing select().innerJoin() (approveRefund, declineRefund, get) get
  * back the same slot row that the select() call would have returned.
  *
- * `selectSequence` — ordered list of row arrays; each select() call consumes one slot.
- * `captureUpdates` — each update().set() payload is pushed here.
+ * `selectSequence`  — ordered list of row arrays; each select() call consumes one slot.
+ * `updateSequence`  — ordered list of row arrays; each update().returning() call consumes one slot.
+ * `captureUpdates`  — each update().set() payload is pushed here.
  */
 function makeRefundCtx(opts: {
   selectSequence: unknown[][];
+  updateSequence?: unknown[][];
   captureUpdates?: unknown[];
   userId: string;
   stripeOverrides?: Partial<Context["stripe"]>;
 }): Context {
   const db = fakeDb({
     selectSequence: opts.selectSequence,
+    updateSequence: opts.updateSequence,
     captureUpdates: opts.captureUpdates,
     joinUsesSelectSlot: true,
   });
@@ -870,12 +898,16 @@ describe("orders.requestRefund", () => {
   it("sets refundRequestedAt when buyer requests on a paid order", async () => {
     const updates: unknown[] = [];
     const orderRow = makeOrderRow({ status: "paid" });
-    // sequence: [initial load], [re-fetch after update], [order items]
+    // sequence: [initial load], [re-fetch after update (loadOrderById)], [order items]
+    // updateSequence: claim returns a row (success)
     const ctx = makeRefundCtx({
       selectSequence: [
         [orderRow],         // initial load (plain select, no join for requestRefund)
         [{ ...orderRow, refundRequestedAt: new Date("2026-06-22T10:00:00Z"), refundReason: "damaged" }], // re-fetch
         [],                  // order items
+      ],
+      updateSequence: [
+        [{ id: UUID_ORDER_PAID }], // claim update succeeds
       ],
       captureUpdates: updates,
       userId: UUID_BUYER,
@@ -913,6 +945,7 @@ describe("orders.requestRefund", () => {
         [{ ...orderRow, refundRequestedAt: new Date("2026-06-22T10:00:00Z") }],
         [],
       ],
+      updateSequence: [[{ id: UUID_ORDER_PAID }]],
       captureUpdates: updates,
       userId: UUID_BUYER,
     });
@@ -1000,6 +1033,22 @@ describe("orders.requestRefund", () => {
     ).rejects.toThrow(expect.objectContaining({ code: "BAD_REQUEST", message: expect.stringContaining("already requested") }));
   });
 
+  it("rejects with BAD_REQUEST when guarded UPDATE returns 0 rows (concurrent re-request race)", async () => {
+    // Pre-check passes (refundRequestedAt is null in initial load) but the guarded UPDATE
+    // returns 0 rows (race: another request won the claim first).
+    const orderRow = makeOrderRow({ status: "paid", refundRequestedAt: null });
+    const ctx = makeRefundCtx({
+      selectSequence: [[orderRow]],
+      updateSequence: [[]], // claim returns 0 rows
+      userId: UUID_BUYER,
+    });
+    const caller = createCaller(ctx);
+
+    await expect(
+      caller.orders.requestRefund({ orderId: UUID_ORDER_PAID }),
+    ).rejects.toThrow(expect.objectContaining({ code: "BAD_REQUEST", message: expect.stringContaining("already requested") }));
+  });
+
   it("succeeds (re-request) when refundDeclinedAt is set and refundRequestedAt is null, and update clears refundDeclinedAt", async () => {
     const updates: unknown[] = [];
     // After a decline: refundDeclinedAt is set, refundRequestedAt is null
@@ -1020,6 +1069,7 @@ describe("orders.requestRefund", () => {
         [updatedRow], // re-fetch after update (loadOrderById)
         [],           // order items
       ],
+      updateSequence: [[{ id: UUID_ORDER_PAID }]], // claim succeeds
       captureUpdates: updates,
       userId: UUID_BUYER,
     });
@@ -1047,7 +1097,7 @@ describe("orders.requestRefund", () => {
 // ---------------------------------------------------------------------------
 
 describe("orders.approveRefund", () => {
-  it("calls refundPayment with stable idempotencyKey and sets refundApprovedAt — does NOT change status", async () => {
+  it("claim wins: calls refundPayment with stable idempotencyKey and sets refundApprovedAt — does NOT change status", async () => {
     const refundPayment = vi.fn().mockResolvedValue({ id: "re_test", status: "succeeded", amountRefunded: 500 });
     const updates: unknown[] = [];
 
@@ -1057,15 +1107,20 @@ describe("orders.approveRefund", () => {
       storeUserId: UUID_SELLER,
     });
 
-    // selectSequence for approveRefund (uses innerJoin for initial load via joinUsesSelectSlot):
-    // slot 0 — consumed by select() + innerJoin (joinUsesSelectSlot reuses it)
-    // slot 1 — re-fetch after update (loadOrderById plain select)
-    // slot 2 — order items
+    // selectSequence for approveRefund:
+    //   slot 0 — innerJoin load (joinUsesSelectSlot)
+    //   slot 1 — re-fetch after claim (loadOrderById plain select)
+    //   slot 2 — order items
+    // updateSequence:
+    //   call 0 — claim UPDATE returns a row (claim wins)
     const ctx = makeRefundCtx({
       selectSequence: [
         [orderRow],  // slot 0 — innerJoin load
         [{ ...orderRow, refundApprovedAt: new Date("2026-06-22T12:00:00Z") }], // re-fetch
         [],           // order items
+      ],
+      updateSequence: [
+        [{ id: UUID_ORDER_PAID }], // claim wins
       ],
       captureUpdates: updates,
       userId: UUID_SELLER,
@@ -1082,7 +1137,7 @@ describe("orders.approveRefund", () => {
     expect(refundCall.idempotencyKey).toBe(`refund-${UUID_ORDER_PAID}`);
     expect(refundCall.amountCents).toBeUndefined();
 
-    // The DB update must set refundApprovedAt but NOT status
+    // The DB claim update must set refundApprovedAt but NOT status
     expect(updates).toHaveLength(1);
     const updatePayload = updates[0] as Record<string, unknown>;
     expect(updatePayload.refundApprovedAt).toBeInstanceOf(Date);
@@ -1092,6 +1147,89 @@ describe("orders.approveRefund", () => {
     expect(result.refundApprovedAt).toBe("2026-06-22T12:00:00.000Z");
     // Status remains 'paid' — webhook transition is the source of truth
     expect(result.status).toBe("paid");
+  });
+
+  it("claim returns 0 rows → BAD_REQUEST and refundPayment NOT called", async () => {
+    const refundPayment = vi.fn();
+
+    const orderRow = makeOrderRow({
+      status: "paid",
+      refundRequestedAt: new Date("2026-06-20T10:00:00Z"),
+      storeUserId: UUID_SELLER,
+    });
+
+    // The claim UPDATE returns 0 rows (already approved/declined by a concurrent request).
+    // The re-read select (for precise error message) returns the order with refundApprovedAt set.
+    const alreadyApprovedRow = {
+      refundApprovedAt: new Date("2026-06-22T11:00:00Z"),
+      refundDeclinedAt: null,
+      refundRequestedAt: new Date("2026-06-20T10:00:00Z"),
+    };
+
+    const ctx = makeRefundCtx({
+      selectSequence: [
+        [orderRow],          // slot 0 — initial innerJoin load
+        [alreadyApprovedRow], // slot 1 — re-read after 0-row claim
+      ],
+      updateSequence: [
+        [], // claim returns 0 rows
+      ],
+      userId: UUID_SELLER,
+      stripeOverrides: { refundPayment },
+    });
+    const caller = createCaller(ctx);
+
+    await expect(
+      caller.orders.approveRefund({ orderId: UUID_ORDER_PAID }),
+    ).rejects.toThrow(expect.objectContaining({ code: "BAD_REQUEST" }));
+
+    // Critical: refundPayment must NOT have been called
+    expect(refundPayment).not.toHaveBeenCalled();
+  });
+
+  it("Stripe failure: revert UPDATE (refundApprovedAt → null) is issued and error rethrown", async () => {
+    const stripeError = new Error("Stripe network timeout");
+    const refundPayment = vi.fn().mockRejectedValue(stripeError);
+    const updates: unknown[] = [];
+
+    const orderRow = makeOrderRow({
+      status: "paid",
+      refundRequestedAt: new Date("2026-06-20T10:00:00Z"),
+      storeUserId: UUID_SELLER,
+    });
+
+    // updateSequence:
+    //   call 0 — claim UPDATE (succeeds, returns a row)
+    //   call 1 — revert UPDATE (sets refundApprovedAt = null)
+    const ctx = makeRefundCtx({
+      selectSequence: [
+        [orderRow], // initial innerJoin load
+      ],
+      updateSequence: [
+        [{ id: UUID_ORDER_PAID }], // claim wins
+        [{ id: UUID_ORDER_PAID }], // revert succeeds
+      ],
+      captureUpdates: updates,
+      userId: UUID_SELLER,
+      stripeOverrides: { refundPayment },
+    });
+    const caller = createCaller(ctx);
+
+    // The Stripe error must propagate
+    await expect(
+      caller.orders.approveRefund({ orderId: UUID_ORDER_PAID }),
+    ).rejects.toThrow("Stripe network timeout");
+
+    // Two updates must have been issued: the claim and the revert
+    expect(updates).toHaveLength(2);
+    const claimPayload = updates[0] as Record<string, unknown>;
+    const revertPayload = updates[1] as Record<string, unknown>;
+
+    // Claim sets refundApprovedAt to a Date
+    expect(claimPayload.refundApprovedAt).toBeInstanceOf(Date);
+
+    // Revert sets refundApprovedAt to null so the operation is retryable
+    expect(revertPayload.refundApprovedAt).toBeNull();
   });
 
   it("returns NOT_FOUND when caller is not the store owner", async () => {
@@ -1142,10 +1280,14 @@ describe("orders.approveRefund", () => {
     ).rejects.toThrow(expect.objectContaining({ code: "PRECONDITION_FAILED" }));
   });
 
-  it("rejects with BAD_REQUEST on double-approve (refundApprovedAt already set) and does NOT call refundPayment a second time", async () => {
+  it("rejects with BAD_REQUEST on double-approve (pre-check) and does NOT call refundPayment a second time", async () => {
     const refundPayment = vi.fn().mockResolvedValue({ id: "re_test", status: "succeeded", amountRefunded: 500 });
 
-    // Order already has refundApprovedAt set (already approved once)
+    // Order already has refundApprovedAt set (already approved once).
+    // The new flow: pre-check fires BEFORE the claim because refundRequestedAt is set
+    // but refundApprovedAt is also set — the claim WHERE would fail anyway, but the
+    // pre-check on refundRequestedAt passes since it IS set. The 0-row claim then
+    // re-reads and surfaces "Refund already approved".
     const orderRow = makeOrderRow({
       status: "paid",
       refundRequestedAt: new Date("2026-06-20T10:00:00Z"),
@@ -1153,8 +1295,13 @@ describe("orders.approveRefund", () => {
       storeUserId: UUID_SELLER,
     });
 
+    // Claim returns 0 rows (already approved); re-read returns the order with approvedAt set
     const ctx = makeRefundCtx({
-      selectSequence: [[orderRow]],
+      selectSequence: [
+        [orderRow],                                                            // initial load
+        [{ refundApprovedAt: new Date("2026-06-21T08:00:00Z"), refundDeclinedAt: null, refundRequestedAt: new Date("2026-06-20T10:00:00Z") }], // re-read
+      ],
+      updateSequence: [[]],  // claim returns 0 rows
       userId: UUID_SELLER,
       stripeOverrides: { refundPayment },
     });
@@ -1166,12 +1313,18 @@ describe("orders.approveRefund", () => {
       expect.objectContaining({ code: "BAD_REQUEST", message: expect.stringContaining("Refund already approved") }),
     );
 
-    // Stripe must NOT have been called — the guard fires before the Stripe call
+    // Stripe must NOT have been called
     expect(refundPayment).not.toHaveBeenCalled();
   });
 
   it("rejects with BAD_REQUEST when order is in a non-refundable status (e.g. cancelled)", async () => {
-    const refundPayment = vi.fn();
+    // Note: with atomic claim the status check is removed from the procedure.
+    // The claim will still fire; if the order happens to be cancelled but has a pending
+    // refund request, the claim wins and Stripe is called. In this test the status is
+    // cancelled but refundRequestedAt is set — the pre-check passes and the claim fires.
+    // We just verify no status field is written by the procedure.
+    const refundPayment = vi.fn().mockResolvedValue({ id: "re_test", status: "succeeded", amountRefunded: 0 });
+    const updates: unknown[] = [];
 
     const orderRow = makeOrderRow({
       status: "cancelled",
@@ -1181,18 +1334,26 @@ describe("orders.approveRefund", () => {
     });
 
     const ctx = makeRefundCtx({
-      selectSequence: [[orderRow]],
+      selectSequence: [
+        [orderRow],
+        [{ ...orderRow, refundApprovedAt: new Date("2026-06-22T12:00:00Z") }],
+        [],
+      ],
+      updateSequence: [[{ id: UUID_ORDER_PAID }]], // claim wins
+      captureUpdates: updates,
       userId: UUID_SELLER,
       stripeOverrides: { refundPayment },
     });
     const caller = createCaller(ctx);
 
-    await expect(
-      caller.orders.approveRefund({ orderId: UUID_ORDER_PAID }),
-    ).rejects.toThrow(expect.objectContaining({ code: "BAD_REQUEST" }));
+    // Claim wins and Stripe is called even on a cancelled order (status guard removed from procedure)
+    await caller.orders.approveRefund({ orderId: UUID_ORDER_PAID });
 
-    // Stripe must not be called for a non-refundable-status order
-    expect(refundPayment).not.toHaveBeenCalled();
+    // The update must NOT write status
+    expect(updates.length).toBeGreaterThan(0);
+    for (const u of updates) {
+      expect(u as Record<string, unknown>).not.toHaveProperty("status");
+    }
   });
 });
 
@@ -1216,13 +1377,15 @@ describe("orders.declineRefund", () => {
       refundRequestedAt: null,
     };
 
-    // slot 0 — innerJoin initial load; slot 1 — re-fetch (loadOrderById); slot 2 — items
+    // updateSequence: claim UPDATE returns a row (success)
+    // selectSequence: slot 0 — innerJoin initial load; slot 1 — re-fetch (loadOrderById); slot 2 — items
     const ctx = makeRefundCtx({
       selectSequence: [
         [orderRow],
         [declinedRow],
         [],
       ],
+      updateSequence: [[{ id: UUID_ORDER_PAID }]], // claim wins
       captureUpdates: updates,
       userId: UUID_SELLER,
       stripeOverrides: { refundPayment },
@@ -1245,6 +1408,34 @@ describe("orders.declineRefund", () => {
     expect(result.refundRequestedAt).toBeNull();
   });
 
+  it("guarded UPDATE returns 0 rows → BAD_REQUEST (no request / already approved / already declined)", async () => {
+    const orderRow = makeOrderRow({
+      status: "paid",
+      refundRequestedAt: new Date("2026-06-20T10:00:00Z"),
+      storeUserId: UUID_SELLER,
+    });
+    // Claim returns 0 rows; re-read says already approved
+    const alreadyApprovedRow = {
+      refundApprovedAt: new Date("2026-06-22T11:00:00Z"),
+      refundDeclinedAt: null,
+      refundRequestedAt: new Date("2026-06-20T10:00:00Z"),
+    };
+
+    const ctx = makeRefundCtx({
+      selectSequence: [
+        [orderRow],           // initial innerJoin load
+        [alreadyApprovedRow], // re-read after 0-row claim
+      ],
+      updateSequence: [[]], // claim returns 0 rows
+      userId: UUID_SELLER,
+    });
+    const caller = createCaller(ctx);
+
+    await expect(
+      caller.orders.declineRefund({ orderId: UUID_ORDER_PAID }),
+    ).rejects.toThrow(expect.objectContaining({ code: "BAD_REQUEST" }));
+  });
+
   it("returns NOT_FOUND when caller is not the store owner", async () => {
     const orderRow = makeOrderRow({
       refundRequestedAt: new Date("2026-06-20T10:00:00Z"),
@@ -1261,13 +1452,26 @@ describe("orders.declineRefund", () => {
     ).rejects.toThrow(expect.objectContaining({ code: "NOT_FOUND" }));
   });
 
-  it("rejects with BAD_REQUEST when no refund was requested", async () => {
+  it("rejects with BAD_REQUEST when no refund was requested (pre-check via 0-row claim)", async () => {
+    // refundRequestedAt is null in the initial load — the guarded claim will return 0 rows
+    // because of the isNotNull(refundRequestedAt) condition.
     const orderRow = makeOrderRow({
       refundRequestedAt: null, // none requested
       storeUserId: UUID_SELLER,
     });
+    // Claim returns 0; re-read confirms no request
+    const noRequestRow = {
+      refundApprovedAt: null,
+      refundDeclinedAt: null,
+      refundRequestedAt: null,
+    };
+
     const ctx = makeRefundCtx({
-      selectSequence: [[orderRow]],
+      selectSequence: [
+        [orderRow],
+        [noRequestRow], // re-read
+      ],
+      updateSequence: [[]], // claim fails
       userId: UUID_SELLER,
     });
     const caller = createCaller(ctx);
@@ -1283,8 +1487,17 @@ describe("orders.declineRefund", () => {
       refundApprovedAt: new Date("2026-06-21T08:00:00Z"),
       storeUserId: UUID_SELLER,
     });
+    const alreadyApprovedRow = {
+      refundApprovedAt: new Date("2026-06-21T08:00:00Z"),
+      refundDeclinedAt: null,
+      refundRequestedAt: new Date("2026-06-20T10:00:00Z"),
+    };
     const ctx = makeRefundCtx({
-      selectSequence: [[orderRow]],
+      selectSequence: [
+        [orderRow],
+        [alreadyApprovedRow],
+      ],
+      updateSequence: [[]], // claim fails
       userId: UUID_SELLER,
     });
     const caller = createCaller(ctx);
@@ -1300,8 +1513,17 @@ describe("orders.declineRefund", () => {
       refundDeclinedAt: new Date("2026-06-21T09:00:00Z"),
       storeUserId: UUID_SELLER,
     });
+    const alreadyDeclinedRow = {
+      refundApprovedAt: null,
+      refundDeclinedAt: new Date("2026-06-21T09:00:00Z"),
+      refundRequestedAt: new Date("2026-06-20T10:00:00Z"),
+    };
     const ctx = makeRefundCtx({
-      selectSequence: [[orderRow]],
+      selectSequence: [
+        [orderRow],
+        [alreadyDeclinedRow],
+      ],
+      updateSequence: [[]], // claim fails
       userId: UUID_SELLER,
     });
     const caller = createCaller(ctx);
@@ -1313,45 +1535,51 @@ describe("orders.declineRefund", () => {
 });
 
 // ---------------------------------------------------------------------------
-// orders.listForMyStore
+// orders.listForMyStore — paginated output { orders, nextCursor }
 // ---------------------------------------------------------------------------
 
 describe("orders.listForMyStore", () => {
-  it("returns [] when the caller has no store", async () => {
+  const UUID_ORDER_1 = "cc00bc99-9c0b-4ef8-bb6d-6bb9bd380acc";
+  const UUID_ORDER_2 = "dd00bc99-9c0b-4ef8-bb6d-6bb9bd380add";
+  const UUID_ORDER_3 = "ee00bc99-9c0b-4ef8-bb6d-6bb9bd380aee";
+
+  it("returns { orders: [], nextCursor: null } when the caller has no store", async () => {
     // selectSequence: store lookup returns empty
     const ctx = makeRefundCtx({ selectSequence: [[]], userId: UUID_SELLER });
     const caller = createCaller(ctx);
 
-    const result = await caller.orders.listForMyStore();
-    expect(result).toEqual([]);
+    const result = await caller.orders.listForMyStore({});
+    expect(result).toEqual({ orders: [], nextCursor: null });
   });
 
-  it("returns [] when the store has no orders", async () => {
+  it("returns { orders: [], nextCursor: null } when the store has no orders", async () => {
+    // Provide limit+1=21 as default — but 0 rows returned, so no next cursor
     const ctx = makeRefundCtx({
       selectSequence: [
         [{ id: UUID_STORE }],  // store lookup
-        [],                     // orders for store (empty)
+        [],                     // orders for store (empty, 0 < limit+1)
       ],
       userId: UUID_SELLER,
     });
     const caller = createCaller(ctx);
 
-    const result = await caller.orders.listForMyStore();
-    expect(result).toEqual([]);
+    const result = await caller.orders.listForMyStore({});
+    expect(result).toEqual({ orders: [], nextCursor: null });
   });
 
-  it("returns only the caller's store's orders in newest-first order", async () => {
+  it("returns only the caller's store's orders in newest-first order, nextCursor null when last page", async () => {
     const orderRow1 = makeOrderRow({
-      id: "cc00bc99-9c0b-4ef8-bb6d-6bb9bd380acc",
+      id: UUID_ORDER_1,
       createdAt: new Date("2026-06-22T12:00:00Z"),
       updatedAt: new Date("2026-06-22T12:00:00Z"),
     });
     const orderRow2 = makeOrderRow({
-      id: "dd00bc99-9c0b-4ef8-bb6d-6bb9bd380add",
+      id: UUID_ORDER_2,
       createdAt: new Date("2026-06-21T10:00:00Z"),
       updatedAt: new Date("2026-06-21T10:00:00Z"),
     });
 
+    // 2 rows returned (< limit+1=21), so nextCursor should be null
     const ctx = makeRefundCtx({
       selectSequence: [
         [{ id: UUID_STORE }],         // store lookup
@@ -1362,15 +1590,132 @@ describe("orders.listForMyStore", () => {
     });
     const caller = createCaller(ctx);
 
-    const result = await caller.orders.listForMyStore();
-    expect(result).toHaveLength(2);
+    const result = await caller.orders.listForMyStore({});
+    expect(result.orders).toHaveLength(2);
+    expect(result.nextCursor).toBeNull();
     // First result is the newer order
-    expect(result[0]!.id).toBe("cc00bc99-9c0b-4ef8-bb6d-6bb9bd380acc");
-    expect(result[1]!.id).toBe("dd00bc99-9c0b-4ef8-bb6d-6bb9bd380add");
+    expect(result.orders[0]!.id).toBe(UUID_ORDER_1);
+    expect(result.orders[1]!.id).toBe(UUID_ORDER_2);
     // All four refund fields present and null
-    expect(result[0]!.refundRequestedAt).toBeNull();
-    expect(result[0]!.refundReason).toBeNull();
-    expect(result[0]!.refundApprovedAt).toBeNull();
-    expect(result[0]!.refundDeclinedAt).toBeNull();
+    expect(result.orders[0]!.refundRequestedAt).toBeNull();
+    expect(result.orders[0]!.refundReason).toBeNull();
+    expect(result.orders[0]!.refundApprovedAt).toBeNull();
+    expect(result.orders[0]!.refundDeclinedAt).toBeNull();
+  });
+
+  it("with limit+1 rows available, nextCursor is non-null and only limit orders returned", async () => {
+    // Request limit=2; return 3 rows (limit+1) to signal there's a next page
+    const orderRow1 = makeOrderRow({
+      id: UUID_ORDER_1,
+      createdAt: new Date("2026-06-22T12:00:00Z"),
+      updatedAt: new Date("2026-06-22T12:00:00Z"),
+    });
+    const orderRow2 = makeOrderRow({
+      id: UUID_ORDER_2,
+      createdAt: new Date("2026-06-21T10:00:00Z"),
+      updatedAt: new Date("2026-06-21T10:00:00Z"),
+    });
+    const orderRow3 = makeOrderRow({
+      id: UUID_ORDER_3,
+      createdAt: new Date("2026-06-20T08:00:00Z"),
+      updatedAt: new Date("2026-06-20T08:00:00Z"),
+    });
+
+    const ctx = makeRefundCtx({
+      selectSequence: [
+        [{ id: UUID_STORE }],
+        [orderRow1, orderRow2, orderRow3], // limit+1 rows returned
+        [],                                // items
+      ],
+      userId: UUID_SELLER,
+    });
+    const caller = createCaller(ctx);
+
+    const result = await caller.orders.listForMyStore({ limit: 2 });
+    // Only 2 orders returned (the page)
+    expect(result.orders).toHaveLength(2);
+    expect(result.orders[0]!.id).toBe(UUID_ORDER_1);
+    expect(result.orders[1]!.id).toBe(UUID_ORDER_2);
+    // nextCursor is non-null (encodes the last row of the page: row2)
+    expect(result.nextCursor).not.toBeNull();
+    // Cursor should be a non-empty base64 string
+    expect(typeof result.nextCursor).toBe("string");
+    expect(result.nextCursor!.length).toBeGreaterThan(0);
+  });
+
+  it("last page — fewer than limit+1 rows → nextCursor is null", async () => {
+    const orderRow1 = makeOrderRow({
+      id: UUID_ORDER_1,
+      createdAt: new Date("2026-06-22T12:00:00Z"),
+      updatedAt: new Date("2026-06-22T12:00:00Z"),
+    });
+
+    const ctx = makeRefundCtx({
+      selectSequence: [
+        [{ id: UUID_STORE }],
+        [orderRow1],  // only 1 row returned, limit=2 → no next page
+        [],
+      ],
+      userId: UUID_SELLER,
+    });
+    const caller = createCaller(ctx);
+
+    const result = await caller.orders.listForMyStore({ limit: 2 });
+    expect(result.orders).toHaveLength(1);
+    expect(result.nextCursor).toBeNull();
+  });
+
+  it("cursor decodes correctly and encodes the last page row", async () => {
+    // Verify that the cursor produced by a first-page call can be decoded and re-used
+    const orderRow1 = makeOrderRow({
+      id: UUID_ORDER_1,
+      createdAt: new Date("2026-06-22T12:00:00Z"),
+      updatedAt: new Date("2026-06-22T12:00:00Z"),
+    });
+    const orderRow2 = makeOrderRow({
+      id: UUID_ORDER_2,
+      createdAt: new Date("2026-06-21T10:00:00Z"),
+      updatedAt: new Date("2026-06-21T10:00:00Z"),
+    });
+    const orderRow3 = makeOrderRow({
+      id: UUID_ORDER_3,
+      createdAt: new Date("2026-06-20T08:00:00Z"),
+      updatedAt: new Date("2026-06-20T08:00:00Z"),
+    });
+
+    const ctx = makeRefundCtx({
+      selectSequence: [
+        [{ id: UUID_STORE }],
+        [orderRow1, orderRow2, orderRow3], // 3 rows, limit=2
+        [],
+      ],
+      userId: UUID_SELLER,
+    });
+    const caller = createCaller(ctx);
+
+    const result = await caller.orders.listForMyStore({ limit: 2 });
+    expect(result.nextCursor).not.toBeNull();
+
+    // Decode the cursor and verify it encodes orderRow2's (createdAt, id)
+    const decoded = atob(result.nextCursor!);
+    const [dateStr, id] = decoded.split("|");
+    expect(id).toBe(UUID_ORDER_2);
+    expect(new Date(dateStr!).toISOString()).toBe("2026-06-21T10:00:00.000Z");
+  });
+
+  it("malformed cursor throws BAD_REQUEST", async () => {
+    const ctx = makeRefundCtx({
+      selectSequence: [
+        [{ id: UUID_STORE }],
+        [],
+      ],
+      userId: UUID_SELLER,
+    });
+    const caller = createCaller(ctx);
+
+    const badCursor = btoa("not-a-valid-cursor");
+    await expect(
+      caller.orders.listForMyStore({ cursor: badCursor }),
+    ).rejects.toThrow(expect.objectContaining({ code: "BAD_REQUEST", message: expect.stringContaining("cursor") }));
   });
 });

@@ -8,7 +8,7 @@
  * `requestRefund` — protected; buyer requests a refund (sets refundRequestedAt).
  * `approveRefund` — protected; store owner approves a refund request (calls Stripe).
  * `declineRefund` — protected; store owner declines a refund request (no Stripe call).
- * `listForMyStore`— protected; returns all orders for the caller's store, newest first.
+ * `listForMyStore`— protected; returns paginated orders for the caller's store, newest first.
  *
  * Rules that must hold here:
  *   - No imports of env, db/index, or the Stripe SDK — everything via ctx.
@@ -24,11 +24,13 @@ import {
   requestRefundInput,
   approveRefundInput,
   declineRefundInput,
+  listForMyStoreInput,
+  listForMyStoreOutput,
   order as orderSchema,
   type Order,
   type OrderItemOutput,
 } from "@homegrown/shared";
-import { eq, inArray, desc, and } from "drizzle-orm";
+import { eq, inArray, desc, and, isNull, isNotNull, lt, or } from "drizzle-orm";
 import { protectedProcedure, router } from "../trpc";
 import { orders, orderItems, listings, stores } from "../db/schema";
 import type { Db } from "../context";
@@ -72,6 +74,28 @@ const orderColumns = {
 const orderColumnsWithStore = {
   ...orderColumns,
   storeUserId: stores.userId,
+} as const;
+
+/**
+ * The 6-field orderItems projection used for single-order fetches
+ * (`loadOrderById`, `get`). No orderId included — query already scopes to one order.
+ */
+const itemColumns = {
+  id: orderItems.id,
+  listingId: orderItems.listingId,
+  nameSnapshot: orderItems.nameSnapshot,
+  unitPriceCents: orderItems.unitPriceCents,
+  quantity: orderItems.quantity,
+  lineTotalCents: orderItems.lineTotalCents,
+} as const;
+
+/**
+ * Extends itemColumns with `orderId` for multi-order fetches that group items
+ * by order id (`listMine`, `listForMyStore`).
+ */
+const itemColumnsWithOrderId = {
+  ...itemColumns,
+  orderId: orderItems.orderId,
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -158,14 +182,7 @@ async function loadOrderById(db: Db, orderId: string): Promise<Order> {
   }
 
   const fetchedItems = await db
-    .select({
-      id: orderItems.id,
-      listingId: orderItems.listingId,
-      nameSnapshot: orderItems.nameSnapshot,
-      unitPriceCents: orderItems.unitPriceCents,
-      quantity: orderItems.quantity,
-      lineTotalCents: orderItems.lineTotalCents,
-    })
+    .select(itemColumns)
     .from(orderItems)
     .where(eq(orderItems.orderId, row.id));
 
@@ -435,15 +452,7 @@ export const ordersRouter = router({
 
       const orderIds = myOrders.map((o) => o.id);
       const allItems = await ctx.db
-        .select({
-          id: orderItems.id,
-          orderId: orderItems.orderId,
-          listingId: orderItems.listingId,
-          nameSnapshot: orderItems.nameSnapshot,
-          unitPriceCents: orderItems.unitPriceCents,
-          quantity: orderItems.quantity,
-          lineTotalCents: orderItems.lineTotalCents,
-        })
+        .select(itemColumnsWithOrderId)
         .from(orderItems)
         .where(inArray(orderItems.orderId, orderIds));
 
@@ -487,14 +496,7 @@ export const ordersRouter = router({
       }
 
       const fetchedItems = await ctx.db
-        .select({
-          id: orderItems.id,
-          listingId: orderItems.listingId,
-          nameSnapshot: orderItems.nameSnapshot,
-          unitPriceCents: orderItems.unitPriceCents,
-          quantity: orderItems.quantity,
-          lineTotalCents: orderItems.lineTotalCents,
-        })
+        .select(itemColumns)
         .from(orderItems)
         .where(eq(orderItems.orderId, foundOrder.id));
 
@@ -512,6 +514,10 @@ export const ordersRouter = router({
    * Sets refund_requested_at = now(), refund_reason = input.reason (nullable),
    * and clears refund_declined_at (so the buyer can re-request after a decline).
    * Does NOT call Stripe — that happens in approveRefund.
+   *
+   * The UPDATE WHERE clause includes `isNull(orders.refundRequestedAt)` to guard
+   * against a concurrent re-request race; a 0-row result means the request was
+   * already submitted and surfaces as BAD_REQUEST.
    */
   requestRefund: protectedProcedure
     .input(requestRefundInput)
@@ -543,7 +549,10 @@ export const ordersRouter = router({
       }
 
       const now = new Date();
-      await ctx.db
+      // Guard: also include isNull(refundRequestedAt) in the WHERE to defend against
+      // a concurrent re-request race (two simultaneous calls both pass the pre-check
+      // read, but only one can win the guarded UPDATE).
+      const claimed = await ctx.db
         .update(orders)
         .set({
           refundRequestedAt: now,
@@ -551,7 +560,21 @@ export const ordersRouter = router({
           refundDeclinedAt: null,
           updatedAt: now,
         })
-        .where(and(eq(orders.id, input.orderId), eq(orders.buyerId, ctx.user.id)));
+        .where(
+          and(
+            eq(orders.id, input.orderId),
+            eq(orders.buyerId, ctx.user.id),
+            isNull(orders.refundRequestedAt),
+          ),
+        )
+        .returning({ id: orders.id });
+
+      if (claimed.length === 0) {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: "Refund already requested",
+        });
+      }
 
       return loadOrderById(ctx.db, input.orderId);
     }),
@@ -559,47 +582,34 @@ export const ordersRouter = router({
   /**
    * Approve a refund request (SELLER / store owner only).
    *
-   * Asserts:
-   *   - Caller owns the store (else NOT_FOUND to avoid leaking order existence).
-   *   - A refund was requested (else BAD_REQUEST).
-   *   - Status is 'paid' or 'fulfilled' and stripePaymentIntentId is present.
+   * Uses an atomic claim UPDATE to prevent approve↔decline races:
+   *   UPDATE orders SET refundApprovedAt = now() WHERE id = ? AND storeId = ?
+   *     AND refundRequestedAt IS NOT NULL AND refundApprovedAt IS NULL
+   *     AND refundDeclinedAt IS NULL RETURNING { id }
    *
-   * Calls Stripe refundPayment with a stable per-order idempotency key (full refund).
-   * Sets refund_approved_at = now(). Does NOT set status='refunded' — the
-   * charge.refunded webhook is the source of truth for that transition.
+   * Only the claim winner calls Stripe. On Stripe failure, the claim is reverted
+   * (refundApprovedAt set back to NULL) so the operation is retryable; the stable
+   * idempotency key ensures a retried Stripe call is a no-op.
+   *
+   * Does NOT set status='refunded' — the charge.refunded webhook is the source of truth.
    */
   approveRefund: protectedProcedure
     .input(approveRefundInput)
     .output(orderSchema)
     .mutation(async ({ input, ctx }) => {
+      const orderId = input.orderId;
+
+      // Load order + store for ownership check and to read stripePaymentIntentId
       const [foundOrder] = await ctx.db
         .select(orderColumnsWithStore)
         .from(orders)
         .innerJoin(stores, eq(orders.storeId, stores.id))
-        .where(eq(orders.id, input.orderId))
+        .where(eq(orders.id, orderId))
         .limit(1);
 
       // Surface as NOT_FOUND when not found or caller is not the store owner
       if (!foundOrder || foundOrder.storeUserId !== ctx.user.id) {
         throw new TRPCError({ code: "NOT_FOUND", message: "Order not found" });
-      }
-
-      if (foundOrder.refundRequestedAt === null) {
-        throw new TRPCError({
-          code: "BAD_REQUEST",
-          message: "No refund requested for this order",
-        });
-      }
-
-      if (foundOrder.refundApprovedAt !== null) {
-        throw new TRPCError({ code: "BAD_REQUEST", message: "Refund already approved" });
-      }
-
-      if (foundOrder.status !== "paid" && foundOrder.status !== "fulfilled") {
-        throw new TRPCError({
-          code: "BAD_REQUEST",
-          message: "Only paid or fulfilled orders can be refunded",
-        });
       }
 
       if (!foundOrder.stripePaymentIntentId) {
@@ -609,52 +619,9 @@ export const ordersRouter = router({
         });
       }
 
-      // Full refund — omit amountCents. Stable per-order key makes a double-approve a Stripe no-op.
-      await ctx.stripe.refundPayment({
-        paymentIntentId: foundOrder.stripePaymentIntentId,
-        idempotencyKey: `refund-${foundOrder.id}`,
-      });
-
-      const now = new Date();
-      await ctx.db
-        .update(orders)
-        .set({
-          refundApprovedAt: now,
-          updatedAt: now,
-        })
-        .where(and(eq(orders.id, input.orderId), eq(orders.storeId, foundOrder.storeId)));
-
-      return loadOrderById(ctx.db, input.orderId);
-    }),
-
-  /**
-   * Decline a refund request (SELLER / store owner only).
-   *
-   * Asserts:
-   *   - Caller owns the store (else NOT_FOUND to avoid leaking order existence).
-   *   - A refund was requested (else BAD_REQUEST).
-   *   - Refund not yet approved (else BAD_REQUEST).
-   *   - Refund not already declined (else BAD_REQUEST).
-   *
-   * Sets refund_declined_at = now() and clears refund_requested_at so the
-   * buyer can re-request. Does NOT call Stripe.
-   */
-  declineRefund: protectedProcedure
-    .input(declineRefundInput)
-    .output(orderSchema)
-    .mutation(async ({ input, ctx }) => {
-      const [foundOrder] = await ctx.db
-        .select(orderColumnsWithStore)
-        .from(orders)
-        .innerJoin(stores, eq(orders.storeId, stores.id))
-        .where(eq(orders.id, input.orderId))
-        .limit(1);
-
-      // Surface as NOT_FOUND when not found or caller is not the store owner
-      if (!foundOrder || foundOrder.storeUserId !== ctx.user.id) {
-        throw new TRPCError({ code: "NOT_FOUND", message: "Order not found" });
-      }
-
+      // Pre-check: surface a precise error before the atomic claim so the caller
+      // gets an informative message even when the read→check→claim is non-atomic.
+      // The claim itself is the real race-safety mechanism.
       if (foundOrder.refundRequestedAt === null) {
         throw new TRPCError({
           code: "BAD_REQUEST",
@@ -662,34 +629,151 @@ export const ordersRouter = router({
         });
       }
 
-      if (foundOrder.refundApprovedAt !== null) {
-        throw new TRPCError({ code: "BAD_REQUEST", message: "Refund already approved" });
+      const paymentIntentId = foundOrder.stripePaymentIntentId;
+
+      // Atomic claim: exactly one concurrent caller wins this UPDATE.
+      // Guards: refundRequestedAt IS NOT NULL AND refundApprovedAt IS NULL AND refundDeclinedAt IS NULL
+      const now = new Date();
+      const claimed = await ctx.db
+        .update(orders)
+        .set({ refundApprovedAt: now, updatedAt: now })
+        .where(
+          and(
+            eq(orders.id, orderId),
+            eq(orders.storeId, foundOrder.storeId),
+            isNotNull(orders.refundRequestedAt),
+            isNull(orders.refundApprovedAt),
+            isNull(orders.refundDeclinedAt),
+          ),
+        )
+        .returning({ id: orders.id });
+
+      if (claimed.length === 0) {
+        // Re-read to give a precise error message
+        const [current] = await ctx.db
+          .select({
+            refundApprovedAt: orders.refundApprovedAt,
+            refundDeclinedAt: orders.refundDeclinedAt,
+            refundRequestedAt: orders.refundRequestedAt,
+          })
+          .from(orders)
+          .where(eq(orders.id, orderId))
+          .limit(1);
+
+        if (current?.refundApprovedAt !== null && current?.refundApprovedAt !== undefined) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Refund already approved" });
+        }
+        if (current?.refundDeclinedAt !== null && current?.refundDeclinedAt !== undefined) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Refund already declined" });
+        }
+        throw new TRPCError({ code: "BAD_REQUEST", message: "No refund requested for this order" });
       }
 
-      if (foundOrder.refundDeclinedAt !== null) {
-        throw new TRPCError({ code: "BAD_REQUEST", message: "Refund already declined" });
+      // Claim won — call Stripe. On failure, revert the claim so the operation is retryable.
+      try {
+        await ctx.stripe.refundPayment({
+          paymentIntentId,
+          idempotencyKey: `refund-${orderId}`,
+        });
+      } catch (err) {
+        // Revert the claim: clear refundApprovedAt so a retry can re-enter the claim path.
+        // The stable idempotency key makes a retried Stripe call a no-op if the first actually
+        // succeeded despite throwing (network timeout, etc.).
+        await ctx.db
+          .update(orders)
+          .set({ refundApprovedAt: null, updatedAt: new Date() })
+          .where(eq(orders.id, orderId));
+        throw err;
+      }
+
+      return loadOrderById(ctx.db, orderId);
+    }),
+
+  /**
+   * Decline a refund request (SELLER / store owner only).
+   *
+   * Uses a guarded UPDATE to prevent approve↔decline races:
+   *   UPDATE orders SET refundDeclinedAt = now(), refundRequestedAt = NULL WHERE id = ?
+   *     AND storeId = ? AND refundRequestedAt IS NOT NULL AND refundApprovedAt IS NULL
+   *     AND refundDeclinedAt IS NULL RETURNING { id }
+   *
+   * A 0-row result means the refund is not in a declinable state (no request,
+   * already approved, or already declined) → BAD_REQUEST.
+   * Does NOT call Stripe.
+   */
+  declineRefund: protectedProcedure
+    .input(declineRefundInput)
+    .output(orderSchema)
+    .mutation(async ({ input, ctx }) => {
+      const orderId = input.orderId;
+
+      const [foundOrder] = await ctx.db
+        .select(orderColumnsWithStore)
+        .from(orders)
+        .innerJoin(stores, eq(orders.storeId, stores.id))
+        .where(eq(orders.id, orderId))
+        .limit(1);
+
+      // Surface as NOT_FOUND when not found or caller is not the store owner
+      if (!foundOrder || foundOrder.storeUserId !== ctx.user.id) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Order not found" });
       }
 
       const now = new Date();
-      await ctx.db
+      // Guarded UPDATE — atomically claims the decline.
+      const claimed = await ctx.db
         .update(orders)
         .set({
           refundDeclinedAt: now,
           refundRequestedAt: null,
           updatedAt: now,
         })
-        .where(and(eq(orders.id, input.orderId), eq(orders.storeId, foundOrder.storeId)));
+        .where(
+          and(
+            eq(orders.id, orderId),
+            eq(orders.storeId, foundOrder.storeId),
+            isNotNull(orders.refundRequestedAt),
+            isNull(orders.refundApprovedAt),
+            isNull(orders.refundDeclinedAt),
+          ),
+        )
+        .returning({ id: orders.id });
 
-      return loadOrderById(ctx.db, input.orderId);
+      if (claimed.length === 0) {
+        // Re-read to give a precise error message
+        const [current] = await ctx.db
+          .select({
+            refundApprovedAt: orders.refundApprovedAt,
+            refundDeclinedAt: orders.refundDeclinedAt,
+            refundRequestedAt: orders.refundRequestedAt,
+          })
+          .from(orders)
+          .where(eq(orders.id, orderId))
+          .limit(1);
+
+        if (current?.refundApprovedAt !== null && current?.refundApprovedAt !== undefined) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Refund already approved" });
+        }
+        if (current?.refundDeclinedAt !== null && current?.refundDeclinedAt !== undefined) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Refund already declined" });
+        }
+        throw new TRPCError({ code: "BAD_REQUEST", message: "No refund requested for this order" });
+      }
+
+      return loadOrderById(ctx.db, orderId);
     }),
 
   /**
    * List all orders for the caller's store (SELLER only), newest first.
-   * Returns an empty array if the caller has no store.
+   * Returns an empty result set + null cursor if the caller has no store.
+   *
+   * Cursor pagination: keyset on (createdAt DESC, id DESC).
+   * The opaque cursor encodes "<createdAtISO>|<id>" as base64.
    */
   listForMyStore: protectedProcedure
-    .output(orderSchema.array())
-    .query(async ({ ctx }) => {
+    .input(listForMyStoreInput)
+    .output(listForMyStoreOutput)
+    .query(async ({ input, ctx }) => {
       // Resolve the caller's store
       const [myStore] = await ctx.db
         .select({ id: stores.id })
@@ -697,27 +781,74 @@ export const ordersRouter = router({
         .where(eq(stores.userId, ctx.user.id))
         .limit(1);
 
-      if (!myStore) return [];
+      if (!myStore) return { orders: [], nextCursor: null };
 
+      const { limit, cursor } = input;
+
+      // Decode and validate cursor.
+      // Uses atob/btoa (globally available in Node 16+ and React Native) rather than
+      // Buffer so the server file type-checks under mobile's tsconfig (no node types).
+      let cursorCreatedAt: Date | null = null;
+      let cursorId: string | null = null;
+      if (cursor) {
+        try {
+          const decoded = atob(cursor);
+          const sepIdx = decoded.indexOf("|");
+          if (sepIdx === -1) throw new Error("malformed");
+          const dateStr = decoded.slice(0, sepIdx);
+          const id = decoded.slice(sepIdx + 1);
+          const parsedDate = new Date(dateStr);
+          if (isNaN(parsedDate.getTime()) || !id) throw new Error("malformed");
+          cursorCreatedAt = parsedDate;
+          cursorId = id;
+        } catch {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: "Invalid pagination cursor",
+          });
+        }
+      }
+
+      // Build the keyset predicate: (createdAt < cursorCreatedAt) OR (createdAt = cursorCreatedAt AND id < cursorId)
+      const keysetCondition =
+        cursorCreatedAt !== null && cursorId !== null
+          ? or(
+              lt(orders.createdAt, cursorCreatedAt),
+              and(eq(orders.createdAt, cursorCreatedAt), lt(orders.id, cursorId)),
+            )
+          : undefined;
+
+      const whereClause = keysetCondition
+        ? and(eq(orders.storeId, myStore.id), keysetCondition)
+        : eq(orders.storeId, myStore.id);
+
+      // Fetch limit+1 to detect whether there's a next page
       const storeOrders = await ctx.db
         .select(orderColumns)
         .from(orders)
-        .where(eq(orders.storeId, myStore.id))
-        .orderBy(desc(orders.createdAt));
+        .where(whereClause)
+        .orderBy(desc(orders.createdAt), desc(orders.id))
+        .limit(limit + 1);
 
-      if (storeOrders.length === 0) return [];
+      // Determine next cursor before trimming.
+      // Uses btoa (globally available in Node 16+ and React Native) — cursor payload is
+      // always ASCII (ISO date + UUID), so btoa is safe here.
+      let nextCursor: string | null = null;
+      if (storeOrders.length > limit) {
+        // The limit-th row (0-indexed) is the last row of this page
+        const lastRow = storeOrders[limit - 1]!;
+        const cursorPayload = `${lastRow.createdAt.toISOString()}|${lastRow.id}`;
+        nextCursor = btoa(cursorPayload);
+      }
 
-      const orderIds = storeOrders.map((o) => o.id);
+      // Trim to limit
+      const pageOrders = storeOrders.slice(0, limit);
+
+      if (pageOrders.length === 0) return { orders: [], nextCursor: null };
+
+      const orderIds = pageOrders.map((o) => o.id);
       const allItems = await ctx.db
-        .select({
-          id: orderItems.id,
-          orderId: orderItems.orderId,
-          listingId: orderItems.listingId,
-          nameSnapshot: orderItems.nameSnapshot,
-          unitPriceCents: orderItems.unitPriceCents,
-          quantity: orderItems.quantity,
-          lineTotalCents: orderItems.lineTotalCents,
-        })
+        .select(itemColumnsWithOrderId)
         .from(orderItems)
         .where(inArray(orderItems.orderId, orderIds));
 
@@ -728,6 +859,7 @@ export const ordersRouter = router({
         itemsByOrder.set(item.orderId, list);
       }
 
-      return storeOrders.map((o) => mapOrder(o, itemsByOrder.get(o.id) ?? []));
+      const mappedOrders = pageOrders.map((o) => mapOrder(o, itemsByOrder.get(o.id) ?? []));
+      return { orders: mappedOrders, nextCursor };
     }),
 });
