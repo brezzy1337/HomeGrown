@@ -102,10 +102,10 @@ export const getStoreInput = z.object({
 export type GetStoreInput = z.infer<typeof getStoreInput>;
 
 /**
- * Public store profile returned by `stores.get` and `stores.getMine`.
- * `stripeConnectAccountId` is included so the mobile client can detect whether
- * the seller has completed Connect Express onboarding, but it carries no secret
- * (the account ID is not a credential).
+ * Full store record — the OWNER-FACING shape returned by `stores.create` and
+ * `stores.getMine`. Includes `userId` + `stripeConnectAccountId` (so the owner's
+ * client can detect Connect onboarding state). NOT public: the public
+ * `stores.get` returns `storeProfile` (below), which omits those internal fields.
  */
 export const store = z.object({
   id: z.string().uuid(),
@@ -117,6 +117,16 @@ export const store = z.object({
 });
 
 export type Store = z.infer<typeof store>;
+
+/** Public store profile — safe subset returned by `stores.get` (no userId / Stripe ids). */
+export const storeProfile = z.object({
+  id: z.string().uuid(),
+  name: z.string(),
+  logo: z.string().nullable(),
+  about: z.string().nullable(),
+});
+
+export type StoreProfile = z.infer<typeof storeProfile>;
 
 // ---------------------------------------------------------------------------
 // Listings — enums, CRUD inputs, and output shape

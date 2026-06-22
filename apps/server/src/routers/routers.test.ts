@@ -581,6 +581,98 @@ describe("stores.create", () => {
 });
 
 // ---------------------------------------------------------------------------
+// stores.get
+// ---------------------------------------------------------------------------
+
+describe("stores.get", () => {
+  const PUBLIC_STORE_ID = "a2eebc99-9c0b-4ef8-bb6d-6bb9bd380b00";
+  const PUBLIC_USER_ID  = "b2eebc99-9c0b-4ef8-bb6d-6bb9bd380b01";
+
+  it("returns public profile (id, name, logo, about) for an existing store", async () => {
+    const db = fakeDb({
+      selectRows: [
+        {
+          id: PUBLIC_STORE_ID,
+          name: "Green Acres Farm",
+          logo: "https://example.com/logo.png",
+          about: "Fresh produce daily.",
+        },
+      ],
+    });
+
+    const ctx: Context = {
+      db,
+      jwtSecret: TEST_SECRET,
+      auth: stubAuth,
+      geocode: async () => null,
+      stripe: stubStripe,
+      user: null,
+    };
+    const caller = createCaller(ctx);
+
+    const result = await caller.stores.get({ storeId: PUBLIC_STORE_ID });
+
+    expect(result.id).toBe(PUBLIC_STORE_ID);
+    expect(result.name).toBe("Green Acres Farm");
+    expect(result.logo).toBe("https://example.com/logo.png");
+    expect(result.about).toBe("Fresh produce daily.");
+
+    // Internal fields must NOT be present on the result
+    expect(result).not.toHaveProperty("userId");
+    expect(result).not.toHaveProperty("stripeConnectAccountId");
+  });
+
+  it("coerces null logo and about correctly", async () => {
+    const db = fakeDb({
+      selectRows: [
+        {
+          id: PUBLIC_STORE_ID,
+          name: "Bare Minimum Farm",
+          logo: null,
+          about: null,
+        },
+      ],
+    });
+
+    const ctx: Context = {
+      db,
+      jwtSecret: TEST_SECRET,
+      auth: stubAuth,
+      geocode: async () => null,
+      stripe: stubStripe,
+      user: null,
+    };
+    const caller = createCaller(ctx);
+
+    const result = await caller.stores.get({ storeId: PUBLIC_STORE_ID });
+
+    expect(result.logo).toBeNull();
+    expect(result.about).toBeNull();
+    // Internal fields must NOT be present
+    expect(result).not.toHaveProperty("userId");
+    expect(result).not.toHaveProperty("stripeConnectAccountId");
+  });
+
+  it("throws NOT_FOUND when the store does not exist", async () => {
+    const db = fakeDb({ selectRows: [] });
+
+    const ctx: Context = {
+      db,
+      jwtSecret: TEST_SECRET,
+      auth: stubAuth,
+      geocode: async () => null,
+      stripe: stubStripe,
+      user: null,
+    };
+    const caller = createCaller(ctx);
+
+    await expect(
+      caller.stores.get({ storeId: PUBLIC_USER_ID }),
+    ).rejects.toThrow(expect.objectContaining({ code: "NOT_FOUND" }));
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Shared listing fixture data
 // ---------------------------------------------------------------------------
 

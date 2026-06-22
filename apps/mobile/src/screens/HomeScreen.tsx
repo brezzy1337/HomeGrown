@@ -52,9 +52,10 @@ const FILTER_OPTIONS: { label: string; value: FilterCategory }[] = [
 type BrowseViewProps = {
   lat: number;
   lng: number;
+  onNavigateToStore: (storeId: string, storeName: string) => void;
 };
 
-function BrowseView({ lat, lng }: BrowseViewProps) {
+function BrowseView({ lat, lng, onNavigateToStore }: BrowseViewProps) {
   const [activeCategory, setActiveCategory] = useState<FilterCategory>("all");
 
   const category: ListingCategory | undefined =
@@ -121,7 +122,12 @@ function BrowseView({ lat, lng }: BrowseViewProps) {
           keyExtractor={(item) => item.id}
           contentContainerStyle={styles.listContent}
           scrollEnabled={false}
-          renderItem={({ item }) => <ListingCard item={item} />}
+          renderItem={({ item }) => (
+            <ListingCard
+              item={item}
+              onPressStore={() => onNavigateToStore(item.storeId, item.storeName)}
+            />
+          )}
         />
       ) : null}
     </View>
@@ -203,7 +209,13 @@ export function HomeScreen({ navigation }: Props) {
       ) : null}
 
       {location.status === "granted" && location.coords ? (
-        <BrowseView lat={location.coords.lat} lng={location.coords.lng} />
+        <BrowseView
+          lat={location.coords.lat}
+          lng={location.coords.lng}
+          onNavigateToStore={(storeId, storeName) =>
+            navigation.navigate("StoreProfile", { storeId, storeName })
+          }
+        />
       ) : null}
     </SafeAreaView>
   );
