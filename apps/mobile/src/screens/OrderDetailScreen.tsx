@@ -198,21 +198,30 @@ export function OrderDetailScreen({ route }: Props) {
               <View style={styles.refundBadge}>
                 <Text style={styles.refundRequestedText}>Refund requested</Text>
               </View>
-            ) : (order.status === "paid" || order.status === "fulfilled") ? (
-              <Pressable
-                style={({ pressed }) => [
-                  styles.refundButton,
-                  pressed && styles.refundButtonPressed,
-                  requestRefund.isPending && styles.refundButtonDisabled,
-                ]}
-                onPress={handleRequestRefund}
-                disabled={requestRefund.isPending}
-              >
-                <Text style={styles.refundButtonText}>
-                  {requestRefund.isPending ? "Requesting…" : "Request refund"}
-                </Text>
-              </Pressable>
-            ) : null}
+            ) : (
+              <>
+                {order.refundDeclinedAt ? (
+                  <View style={[styles.refundBadge, styles.refundDeclinedBadge]}>
+                    <Text style={styles.refundDeclinedText}>Refund declined</Text>
+                  </View>
+                ) : null}
+                {(order.status === "paid" || order.status === "fulfilled") ? (
+                  <Pressable
+                    style={({ pressed }) => [
+                      styles.refundButton,
+                      pressed && styles.refundButtonPressed,
+                      requestRefund.isPending && styles.refundButtonDisabled,
+                    ]}
+                    onPress={handleRequestRefund}
+                    disabled={requestRefund.isPending}
+                  >
+                    <Text style={styles.refundButtonText}>
+                      {requestRefund.isPending ? "Requesting…" : "Request refund"}
+                    </Text>
+                  </Pressable>
+                ) : null}
+              </>
+            )}
           </>
         )}
       </ScrollView>
@@ -398,6 +407,9 @@ const styles = StyleSheet.create({
     backgroundColor: "#fff3e0",
     alignItems: "center",
   },
+  refundDeclinedBadge: {
+    backgroundColor: "#fff8e1",
+  },
   refundRequestedText: {
     color: "#e65100",
     fontSize: 14,
@@ -405,6 +417,11 @@ const styles = StyleSheet.create({
   },
   refundApprovedText: {
     color: "#2d6a4f",
+    fontSize: 14,
+    fontWeight: "600",
+  },
+  refundDeclinedText: {
+    color: "#92400e",
     fontSize: 14,
     fontWeight: "600",
   },
