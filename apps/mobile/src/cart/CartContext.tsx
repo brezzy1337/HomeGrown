@@ -21,12 +21,27 @@ import React, {
   useRef,
   useState,
 } from "react";
-import type { NearbyListing } from "@homegrown/shared";
 import { useAuth } from "../auth/AuthContext";
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
+
+/**
+ * Minimal listing shape that addItem needs. Both NearbyListing (Home/Search)
+ * and Listing (store catalog) structurally satisfy this. storeName is optional
+ * because the store-catalog Listing does not carry it; the cart falls back to
+ * the storeId string for display in that rare case.
+ */
+export type CartAddInput = {
+  id: string;
+  name: string;
+  priceCents: number;
+  quantity: number;
+  unit: string;
+  storeId: string;
+  storeName?: string;
+};
 
 export type CartLineItem = {
   listingId: string;
@@ -60,7 +75,7 @@ export type CartContextValue = {
    * { ok: false, reason: "different-store" }. Otherwise increments quantity
    * if the item is already in the cart, up to Math.min(available, 1000).
    */
-  addItem: (listing: NearbyListing) => AddItemResult;
+  addItem: (listing: CartAddInput) => AddItemResult;
   /**
    * Set the quantity of an item. Clamped to [1, min(available, 1000)].
    * No-op if the listing is not in the cart.
@@ -108,7 +123,7 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
     }
   }, [authStatus, setItemsAndRef]);
 
-  const addItem = useCallback((listing: NearbyListing): AddItemResult => {
+  const addItem = useCallback((listing: CartAddInput): AddItemResult => {
     // Defense-in-depth: reject sold-out listings before touching state.
     if (listing.quantity === 0) {
       return { ok: false, reason: "sold-out" };
@@ -154,7 +169,7 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
         priceCents: listing.priceCents,
         unit: listing.unit,
         storeId: listing.storeId,
-        storeName: listing.storeName,
+        storeName: listing.storeName ?? listing.storeId,
         quantity: Math.min(1, cap),
         available: listing.quantity,
       };

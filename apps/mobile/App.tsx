@@ -44,6 +44,7 @@ import { CartScreen } from "./src/screens/CartScreen";
 import { OrdersScreen } from "./src/screens/OrdersScreen";
 import { OrderDetailScreen } from "./src/screens/OrderDetailScreen";
 import { StoreOrdersScreen } from "./src/screens/StoreOrdersScreen";
+import { StoreProfileScreen } from "./src/screens/StoreProfileScreen";
 import type {
   PreAuthStackParamList,
   AuthedStackParamList,
@@ -123,6 +124,11 @@ function RootNavigator() {
             name="StoreOrders"
             component={StoreOrdersScreen}
             options={{ title: "Your Orders" }}
+          />
+          <AuthedStack.Screen
+            name="StoreProfile"
+            component={StoreProfileScreen}
+            options={{ title: "Stand" }}
           />
         </AuthedStack.Navigator>
       )}

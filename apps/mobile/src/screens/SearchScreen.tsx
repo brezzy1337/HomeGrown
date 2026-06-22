@@ -62,9 +62,10 @@ const FILTER_OPTIONS: { label: string; value: FilterCategory }[] = [
 type SearchViewProps = {
   lat: number;
   lng: number;
+  onNavigateToStore: (storeId: string, storeName: string) => void;
 };
 
-function SearchView({ lat, lng }: SearchViewProps) {
+function SearchView({ lat, lng, onNavigateToStore }: SearchViewProps) {
   const [inputText, setInputText] = useState("");
   const [debouncedQuery, setDebouncedQuery] = useState<string | undefined>(undefined);
   const [activeCategory, setActiveCategory] = useState<FilterCategory>("all");
@@ -166,7 +167,12 @@ function SearchView({ lat, lng }: SearchViewProps) {
           data={data}
           keyExtractor={(item) => item.id}
           contentContainerStyle={styles.listContent}
-          renderItem={({ item }) => <ListingCard item={item} />}
+          renderItem={({ item }) => (
+            <ListingCard
+              item={item}
+              onPressStore={() => onNavigateToStore(item.storeId, item.storeName)}
+            />
+          )}
         />
       ) : null}
     </View>
@@ -177,7 +183,7 @@ function SearchView({ lat, lng }: SearchViewProps) {
 // SearchScreen
 // ---------------------------------------------------------------------------
 
-export function SearchScreen(_props: Props) {
+export function SearchScreen({ navigation }: Props) {
   const location = useDeviceLocation();
 
   return (
@@ -212,7 +218,13 @@ export function SearchScreen(_props: Props) {
 
       {/* Location ready — render search UI */}
       {location.status === "granted" && location.coords ? (
-        <SearchView lat={location.coords.lat} lng={location.coords.lng} />
+        <SearchView
+          lat={location.coords.lat}
+          lng={location.coords.lng}
+          onNavigateToStore={(storeId, storeName) =>
+            navigation.navigate("StoreProfile", { storeId, storeName })
+          }
+        />
       ) : null}
     </SafeAreaView>
   );
