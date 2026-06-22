@@ -18,6 +18,7 @@ export type PreAuthStackParamList = {
 
 export type AuthedStackParamList = {
   Home: undefined;
+  Search: undefined;
   YourStand: undefined;
   Cart: undefined;
   Orders: undefined;

@@ -38,6 +38,7 @@ import { HeroScreen } from "./src/screens/HeroScreen";
 import { LogInScreen } from "./src/screens/LogInScreen";
 import { SignUpScreen } from "./src/screens/SignUpScreen";
 import { HomeScreen } from "./src/screens/HomeScreen";
+import { SearchScreen } from "./src/screens/SearchScreen";
 import { YourStandScreen } from "./src/screens/YourStandScreen";
 import { CartScreen } from "./src/screens/CartScreen";
 import { OrdersScreen } from "./src/screens/OrdersScreen";
@@ -92,6 +93,11 @@ function RootNavigator() {
             name="Home"
             component={HomeScreen}
             options={{ headerShown: false }}
+          />
+          <AuthedStack.Screen
+            name="Search"
+            component={SearchScreen}
+            options={{ title: "Search" }}
           />
           <AuthedStack.Screen
             name="YourStand"
