@@ -34,6 +34,7 @@ import {
   Text,
   View,
 } from "react-native";
+import { useNavigation } from "@react-navigation/native";
 import * as WebBrowser from "expo-web-browser";
 import {
   createStoreInput,
@@ -45,6 +46,7 @@ import {
 } from "@homegrown/shared";
 import { trpc } from "../api/trpc";
 import { FormField } from "../components/FormField";
+import type { AuthedNavigationProp } from "../navigation/types";
 import { capitalise } from "../utils/text";
 import { formatCents } from "../utils/money";
 
@@ -641,11 +643,18 @@ function StoreView({ storeId, storeName }: { storeId: string; storeName: string 
   // without prop-drilling through PaymentsSection.
   const { data: connectStatusData } = trpc.connect.status.useQuery();
   const chargesEnabled = connectStatusData?.chargesEnabled ?? false;
+  const navigation = useNavigation<AuthedNavigationProp>();
 
   return (
     <>
       <View style={styles.storeHeader}>
         <Text style={styles.storeName}>{storeName}</Text>
+        <Pressable
+          style={styles.ordersButton}
+          onPress={() => navigation.navigate("StoreOrders")}
+        >
+          <Text style={styles.ordersButtonText}>Orders / Refund requests</Text>
+        </Pressable>
       </View>
       <PaymentsSection />
       <LocationSection />
@@ -738,11 +747,25 @@ const styles = StyleSheet.create({
   },
   storeHeader: {
     marginBottom: 20,
+    gap: 10,
   },
   storeName: {
     fontSize: 22,
     fontWeight: "700",
     color: "#1a1a1a",
+  },
+  ordersButton: {
+    alignSelf: "flex-start",
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: "#2d6a4f",
+  },
+  ordersButtonText: {
+    color: "#2d6a4f",
+    fontSize: 14,
+    fontWeight: "600",
   },
   successCard: {
     backgroundColor: "#e8f5e9",

@@ -22,6 +22,7 @@ export type AuthedStackParamList = {
   Cart: undefined;
   Orders: undefined;
   OrderDetail: { orderId: string };
+  StoreOrders: undefined;
 };
 
 // Convenience aliases
