@@ -675,6 +675,96 @@ image is always recoverable from Artifact Registry — it is never overwritten b
 
 ---
 
+## 8. Reconciliation poller — Cloud Run Job (P0)
+
+### What it does
+
+The reconcile job is a **P0 marketplace unblock**. The always-on Cloud Run Service
+relies on Stripe webhooks to keep seller onboarding state and payment status current.
+Webhooks can be delayed or dropped (Stripe retries for 72 h but only delivers once
+per attempt). The reconcile job covers the gap:
+
+- **Seller onboarding resync** — calls the Stripe API for every seller whose
+  `stripeOnboarded` flag is `false` or stale, and sets it `true` once
+  `charges_enabled && payouts_enabled`. Stripe webhooks (`account.updated`) are
+  the real-time path; this job is the catch-up path.
+- **Stale-payment reconciliation** — finds `PaymentIntent` rows in state
+  `requires_capture` or `processing` that are older than the configured threshold
+  and re-fetches their status from Stripe, updating the DB accordingly.
+
+The marketplace can transact only once both paths are operating. This job is the
+non-webhook path.
+
+### Cadence
+
+Every **15 minutes**, triggered by Cloud Scheduler (`*/15 * * * *`, `Etc/UTC`).
+
+### Image and command override
+
+The job uses the **same server image** as the always-on service — no separate image
+to build or push. The Dockerfile builder stage runs both:
+
+```
+pnpm --filter @homegrown/server build           # → dist/index.mjs  (service)
+pnpm --filter @homegrown/server build:reconcile # → dist/reconcile.mjs (job)
+```
+
+Both bundles are copied into the runtime stage. The Cloud Run Service starts with
+`CMD ["node", "/app/index.mjs"]`. The Cloud Run Job overrides the command to
+`["node", "/app/reconcile.mjs"]`.
+
+### Secrets and Cloud SQL
+
+`reconcile.main.ts` imports `../env`, which validates the **full** env schema at
+boot. Any missing secret causes a non-zero exit before any work is done. The job
+therefore injects the same six runtime secrets as the service:
+
+| Secret Manager name | Purpose |
+|---|---|
+| `DATABASE_URL` | Postgres via Cloud SQL unix-socket |
+| `JWT_SECRET` | HMAC signing key |
+| `GOOGLE_GEOCODING_API_KEY` | Geocoding (required by env schema) |
+| `STRIPE_SECRET_KEY` | Stripe platform key for API calls |
+| `STRIPE_WEBHOOK_SECRET` | Webhook HMAC (required by env schema) |
+| `STRIPE_WEBHOOK_SECRET_CONNECT` | Connect webhook HMAC (required by env schema) |
+
+The `STRIPE_CONNECT_REFRESH_URL` and `STRIPE_CONNECT_RETURN_URL` env vars have
+schema defaults (`https://homegrown.app/connect/…`) and are omitted from the Job.
+
+The Cloud SQL instance is attached via the
+`run.googleapis.com/cloudsql-instances` annotation on the job template so the
+unix-socket path embedded in `DATABASE_URL` resolves inside the container.
+
+### Terraform resources (infra/terraform/reconcile_job.tf)
+
+| Resource | Purpose |
+|---|---|
+| `google_service_account.reconcile_scheduler` | Dedicated invoker SA for Cloud Scheduler (least-privilege) |
+| `google_cloud_run_v2_job.reconcile` | The job itself; timeout 600 s, max_retries 1, parallelism 1 |
+| `google_cloud_run_v2_job_iam_member.scheduler_invoker` | Grants `roles/run.invoker` on the job to the scheduler SA |
+| `google_cloud_scheduler_job.reconcile` | Cron `*/15 * * * *` (Etc/UTC); HTTP POST to Admin API `:run` endpoint with OAuth token |
+
+The job runs under the existing `google_service_account.runtime` SA
+(`homegrown-server`), which already holds `roles/secretmanager.secretAccessor` on
+all six runtime secrets (bound in `iam.tf`).
+
+`cloudscheduler.googleapis.com` is enabled in `apis.tf` alongside the other
+project APIs.
+
+### Triggering manually (for testing)
+
+```bash
+gcloud run jobs execute homegrown-reconcile \
+  --region=<REGION> \
+  --project=<PROJECT_ID> \
+  --wait
+```
+
+Logs stream to Cloud Logging under the `homegrown-reconcile` job name. The job
+prints a JSON summary on success and exits 1 on hard failure (e.g. DB unreachable).
+
+---
+
 ## Future: compiled build (post-M1)
 
 Replace the `CMD` with a build step that runs `tsc` (or an esbuild bundle) and
