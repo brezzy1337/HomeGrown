@@ -214,10 +214,14 @@ export const listingsRouter = router({
         : sql``;
 
       // Build name filter clause — case-insensitive substring match.
-      // `query` is a bound parameter; the `%` wildcards are added in SQL (not via
-      // string concatenation), so this is safe against SQL injection.
-      const nameFilter = query
-        ? sql`AND l.name ILIKE '%' || ${query} || '%'`
+      // `query` is a bound parameter (no SQL injection). We ALSO escape the LIKE
+      // metacharacters %, _ and \ in the user value (with an explicit ESCAPE '\')
+      // so a `%`-laden query can't turn into a match-everything full-table scan on
+      // this unauthenticated endpoint — only the outer literal '%' wildcards do
+      // substring matching; the user's own %/_ are treated literally.
+      const escapedQuery = query?.replace(/[%_\\]/g, "\\$&");
+      const nameFilter = escapedQuery
+        ? sql`AND l.name ILIKE '%' || ${escapedQuery} || '%' ESCAPE '\'`
         : sql``;
 
       type NearbyRow = {
