@@ -118,6 +118,16 @@ export const store = z.object({
 
 export type Store = z.infer<typeof store>;
 
+/** Public store profile — safe subset returned by `stores.get` (no userId / Stripe ids). */
+export const storeProfile = z.object({
+  id: z.string().uuid(),
+  name: z.string(),
+  logo: z.string().nullable(),
+  about: z.string().nullable(),
+});
+
+export type StoreProfile = z.infer<typeof storeProfile>;
+
 // ---------------------------------------------------------------------------
 // Listings — enums, CRUD inputs, and output shape
 // Consolidates the legacy PostedVegetables / PostedFruit / PostedHerbs triplet
