@@ -45,6 +45,17 @@ resource "google_project_iam_member" "deploy_cloudsql_client" {
   member  = "serviceAccount:${google_service_account.deploy.email}"
 }
 
+# ── Runtime SA — cloudsql.client (connect to Cloud SQL at runtime) ───────────
+# REQUIRED: the Cloud Run service attaches the Cloud SQL instance, but without
+# this role the in-container Cloud SQL connector gets HTTP 403 on
+# cloudsql.instances.get and EVERY runtime query fails ("Failed query …").
+# The deploy SA's binding above only covers CI migrations via the proxy.
+resource "google_project_iam_member" "runtime_cloudsql_client" {
+  project = var.project_id
+  role    = "roles/cloudsql.client"
+  member  = "serviceAccount:${google_service_account.runtime.email}"
+}
+
 # ── Deploy SA can act-as runtime SA for `gcloud run deploy --service-account` ──
 
 resource "google_service_account_iam_member" "deploy_acts_as_runtime" {
