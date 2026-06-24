@@ -671,7 +671,9 @@ describe("orders.create", () => {
     const result = await caller.orders.create({
       items: [{ listingId: UUID_LISTING_1, quantity: 1 }],
       fulfillmentMethod: "pickup",
-      // no deliveryAddress on pickup — shared schema's refine only blocks delivery+empty
+      // A client may send an address even for pickup (the shared schema allows it);
+      // the server must NORMALIZE it to null for pickup orders.
+      deliveryAddress: "999 Should Be Ignored Rd",
     });
 
     expect(result.order.fulfillmentMethod).toBe("pickup");
