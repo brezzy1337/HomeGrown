@@ -61,8 +61,9 @@ export function CartScreen({ navigation }: Props) {
   const [checkoutError, setCheckoutError] = useState<string | null>(null);
   const [isCheckingOut, setIsCheckingOut] = useState(false);
 
-  // Tip: parse tipText to integer cents; clamp to [0, 100_000].
-  const tipCents = Math.min(Math.round((parseFloat(tipText) || 0) * 100), 100000);
+  // Tip: parse tipText to integer cents; clamp to [0, 100_000]
+  // (lower bound guards a stray negative entry from showing a total below subtotal).
+  const tipCents = Math.max(0, Math.min(Math.round((parseFloat(tipText) || 0) * 100), 100000));
   const totalCents = subtotalCents + tipCents;
 
   // Unmount guard — prevents setState calls on an unmounted component.
