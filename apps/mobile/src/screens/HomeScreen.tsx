@@ -31,6 +31,7 @@ import { useDeviceLocation } from "../location/useDeviceLocation";
 import type { AuthedStackParamList } from "../navigation/types";
 import { capitalise } from "../utils/text";
 import { ListingCard } from "../components/ListingCard";
+import { getSeasonalProduce } from "../data/seasonalProduce";
 
 type Props = NativeStackScreenProps<AuthedStackParamList, "Home">;
 
@@ -44,6 +45,40 @@ const FILTER_OPTIONS: { label: string; value: FilterCategory }[] = [
   { label: "All", value: "all" },
   ...listingCategory.options.map((cat) => ({ label: capitalise(cat), value: cat as FilterCategory })),
 ];
+
+// ---------------------------------------------------------------------------
+// SeasonalModule — "In season now" tappable produce shortcuts
+// ---------------------------------------------------------------------------
+
+type SeasonalModuleProps = {
+  onSelectProduce: (produceName: string) => void;
+};
+
+function SeasonalModule({ onSelectProduce }: SeasonalModuleProps) {
+  const { monthLabel, produce } = getSeasonalProduce();
+
+  if (produce.length === 0) {
+    return null;
+  }
+
+  return (
+    <View style={styles.seasonalSection}>
+      <Text style={styles.seasonalHeading}>In season now · {monthLabel}</Text>
+      <FlatList
+        data={produce}
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        keyExtractor={(item) => item}
+        contentContainerStyle={styles.seasonalChipRow}
+        renderItem={({ item }) => (
+          <Pressable style={styles.seasonalChip} onPress={() => onSelectProduce(item)}>
+            <Text style={styles.seasonalChipText}>{item}</Text>
+          </Pressable>
+        )}
+      />
+    </View>
+  );
+}
 
 // ---------------------------------------------------------------------------
 // BrowseView — rendered once coords are available
@@ -209,13 +244,20 @@ export function HomeScreen({ navigation }: Props) {
       ) : null}
 
       {location.status === "granted" && location.coords ? (
-        <BrowseView
-          lat={location.coords.lat}
-          lng={location.coords.lng}
-          onNavigateToStore={(storeId, storeName) =>
-            navigation.navigate("StoreProfile", { storeId, storeName })
-          }
-        />
+        <>
+          <SeasonalModule
+            onSelectProduce={(produceName) =>
+              navigation.navigate("Search", { initialQuery: produceName })
+            }
+          />
+          <BrowseView
+            lat={location.coords.lat}
+            lng={location.coords.lng}
+            onNavigateToStore={(storeId, storeName) =>
+              navigation.navigate("StoreProfile", { storeId, storeName })
+            }
+          />
+        </>
       ) : null}
     </SafeAreaView>
   );
@@ -313,6 +355,38 @@ const styles = StyleSheet.create({
   searchButtonText: {
     color: "#2d6a4f",
     fontSize: 13,
+    fontWeight: "600",
+  },
+  seasonalSection: {
+    backgroundColor: "#fff",
+    borderBottomWidth: 1,
+    borderBottomColor: "#e8eae8",
+    paddingTop: 12,
+    paddingBottom: 4,
+  },
+  seasonalHeading: {
+    fontSize: 15,
+    fontWeight: "700",
+    color: "#2d6a4f",
+    paddingHorizontal: 16,
+    marginBottom: 8,
+  },
+  seasonalChipRow: {
+    paddingHorizontal: 16,
+    paddingBottom: 12,
+    gap: 8,
+  },
+  seasonalChip: {
+    paddingVertical: 6,
+    paddingHorizontal: 14,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: "#2d6a4f",
+    backgroundColor: "#eaf3ee",
+  },
+  seasonalChipText: {
+    fontSize: 13,
+    color: "#2d6a4f",
     fontWeight: "600",
   },
   browseContainer: {

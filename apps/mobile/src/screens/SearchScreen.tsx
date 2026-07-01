@@ -62,12 +62,15 @@ const FILTER_OPTIONS: { label: string; value: FilterCategory }[] = [
 type SearchViewProps = {
   lat: number;
   lng: number;
+  initialQuery?: string;
   onNavigateToStore: (storeId: string, storeName: string) => void;
 };
 
-function SearchView({ lat, lng, onNavigateToStore }: SearchViewProps) {
-  const [inputText, setInputText] = useState("");
-  const [debouncedQuery, setDebouncedQuery] = useState<string | undefined>(undefined);
+function SearchView({ lat, lng, initialQuery, onNavigateToStore }: SearchViewProps) {
+  const [inputText, setInputText] = useState(initialQuery ?? "");
+  const [debouncedQuery, setDebouncedQuery] = useState<string | undefined>(
+    initialQuery && initialQuery.trim().length > 0 ? initialQuery.trim() : undefined,
+  );
   const [activeCategory, setActiveCategory] = useState<FilterCategory>("all");
 
   // Debounce the text input: copy to debouncedQuery after DEBOUNCE_MS of silence.
@@ -195,8 +198,9 @@ function SearchView({ lat, lng, onNavigateToStore }: SearchViewProps) {
 // SearchScreen
 // ---------------------------------------------------------------------------
 
-export function SearchScreen({ navigation }: Props) {
+export function SearchScreen({ navigation, route }: Props) {
   const location = useDeviceLocation();
+  const initialQuery = route.params?.initialQuery;
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -233,6 +237,7 @@ export function SearchScreen({ navigation }: Props) {
         <SearchView
           lat={location.coords.lat}
           lng={location.coords.lng}
+          initialQuery={initialQuery}
           onNavigateToStore={(storeId, storeName) =>
             navigation.navigate("StoreProfile", { storeId, storeName })
           }
